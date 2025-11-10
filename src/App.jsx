@@ -19,6 +19,7 @@ import {
   setDoc,
   where,
 } from 'firebase/firestore';
+import { getApps } from 'firebase/app';
 import Login from './components/Login.jsx';
 import Chat from './components/Chat.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
@@ -44,11 +45,87 @@ function App() {
 
   const chatsListenerRef = useRef(null);
   const streamingTimerRef = useRef(null);
+  const debugLoggedRef = useRef(false);
 
   const activeChat = useMemo(
     () => chats.find((chat) => chat.id === activeChatId) ?? null,
     [chats, activeChatId]
   );
+
+  useEffect(() => {
+    if (debugLoggedRef.current) {
+      return;
+    }
+    debugLoggedRef.current = true;
+
+    try {
+      const envKeys = Object.keys(import.meta.env ?? {}).sort();
+      let firebaseApps = [];
+
+      try {
+        firebaseApps = getApps();
+      } catch (firebaseError) {
+        console.error(
+          '%c[Debug] Firebase getApps() failed',
+          'color:#ef4444;font-weight:bold;',
+          firebaseError
+        );
+      }
+
+      console.groupCollapsed(
+        '%c[Gemini Debug] App bootstrap diagnostics',
+        'color:#6366f1;font-weight:bold;'
+      );
+      console.info('%c✓ App loaded', 'color:#10b981;font-weight:bold;', new Date().toISOString());
+
+      console.group('%cEnvironment variables (import.meta.env)', 'color:#0ea5e9;font-weight:bold;');
+      envKeys.forEach((key) => {
+        if (typeof key !== 'string') return;
+        const isDefined = import.meta.env[key] !== undefined && import.meta.env[key] !== null;
+        console.log(
+          '%c%s%c %s',
+          'color:#475569;font-weight:500;',
+          key,
+          'color:#94a3b8;margin-left:8px;',
+          isDefined ? '✅ definita' : '❌ non definita'
+        );
+      });
+      console.groupEnd();
+
+      console.group('%cFirebase', 'color:#f97316;font-weight:bold;');
+      console.log(
+        '%cgetApps().length%c %d (%s)',
+        'color:#475569;font-weight:500;',
+        'color:#94a3b8;margin-left:8px;',
+        firebaseApps.length,
+        firebaseApps.length > 0 ? '✅ inizializzato' : '⚠️ nessuna app'
+      );
+      console.groupEnd();
+
+      console.group('%cRuntime info', 'color:#22c55e;font-weight:bold;');
+      const href =
+        typeof window !== 'undefined' && window?.location?.href
+          ? window.location.href
+          : 'N/D';
+      console.log('%cwindow.location.href%c %s', 'color:#475569;font-weight:500;', 'color:#94a3b8;', href);
+      console.log(
+        '%cprocess.env.NODE_ENV%c %s',
+        'color:#475569;font-weight:500;',
+        'color:#94a3b8;',
+        typeof process !== 'undefined' ? process.env?.NODE_ENV ?? 'N/D' : 'process non definito'
+      );
+      console.log(
+        '%cimport.meta.env.MODE%c %s',
+        'color:#475569;font-weight:500;',
+        'color:#94a3b8;',
+        import.meta.env?.MODE ?? 'N/D'
+      );
+      console.groupEnd();
+      console.groupEnd();
+    } catch (err) {
+      console.error('%c[Debug] Bootstrap diagnostics failed', 'color:#ef4444;font-weight:bold;', err);
+    }
+  }, []);
 
   const resetStreaming = useCallback(() => {
     if (streamingTimerRef.current) {
@@ -438,16 +515,24 @@ function App() {
 
   if (!user) {
     return (
-      <Login
-        onEmailAuth={handleEmailAuth}
-        onGoogleSignIn={handleGoogleSignIn}
-        isLoading={isAuthenticating}
-      />
+      <>
+        <div className="bg-emerald-50 px-4 py-2 text-center text-xs font-semibold text-emerald-600">
+          App caricata ✅ — controlla la console del browser per il debug log.
+        </div>
+        <Login
+          onEmailAuth={handleEmailAuth}
+          onGoogleSignIn={handleGoogleSignIn}
+          isLoading={isAuthenticating}
+        />
+      </>
     );
   }
 
   return (
     <div className="min-h-screen bg-slate-50">
+      <div className="bg-emerald-50 px-4 py-2 text-center text-xs font-semibold text-emerald-600">
+        App caricata ✅ — controlla la console del browser per il debug log.
+      </div>
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
           <div>
