@@ -27,14 +27,30 @@ const formatMessages = (messages = []) =>
         })
     : [];
 
+const ALLOWED_ORIGIN = 'https://ai-app-vert-chi.vercel.app';
+
+const applyCorsHeaders = (res) => {
+  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+  res.setHeader('Vary', 'Origin');
+};
+
 export default async function handler(req, res) {
+  if (req.method === 'OPTIONS') {
+    applyCorsHeaders(res);
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Max-Age', '86400');
+    return res.status(200).end();
+  }
+
   if (req.method !== 'POST') {
-    return res
-      .status(405)
-      .json({ error: 'Method Not Allowed. Use POST.' });
+    applyCorsHeaders(res);
+    res.setHeader('Allow', ['POST', 'OPTIONS']);
+    return res.status(405).json({ error: 'Method Not Allowed. Use POST.' });
   }
 
   try {
+    applyCorsHeaders(res);
     const {
       model,
       messages,
@@ -100,6 +116,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ reply: result?.response?.text?.() ?? '' });
   } catch (err) {
     console.error('❌ API error:', err);
+    applyCorsHeaders(res);
     return res.status(500).json({ error: err?.message ?? 'Unexpected error' });
   }
 }
