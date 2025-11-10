@@ -27,16 +27,30 @@ const formatMessages = (messages = []) =>
         })
     : [];
 
-const ALLOWED_ORIGIN = 'https://ai-app-vert-chi.vercel.app';
+const ALLOWED_ORIGINS = [
+  'https://ai-app-vert-chi.vercel.app',
+  'https://ai-88rcx293y-giovannim-makers-projects.vercel.app',
+  'https://ai-6zj5iktzo-giovannim-makers-projects.vercel.app',
+  'https://ai-z0a43mww7-giovannim-makers-projects.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:4173',
+];
 
-const applyCorsHeaders = (res) => {
-  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+const applyCorsHeaders = (req, res) => {
+  const requestOrigin = req.headers.origin;
+
+  if (requestOrigin && ALLOWED_ORIGINS.includes(requestOrigin)) {
+    res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGINS[0]);
+  }
+
   res.setHeader('Vary', 'Origin');
 };
 
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
-    applyCorsHeaders(res);
+    applyCorsHeaders(req, res);
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     res.setHeader('Access-Control-Max-Age', '86400');
@@ -44,13 +58,13 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== 'POST') {
-    applyCorsHeaders(res);
+    applyCorsHeaders(req, res);
     res.setHeader('Allow', ['POST', 'OPTIONS']);
     return res.status(405).json({ error: 'Method Not Allowed. Use POST.' });
   }
 
   try {
-    applyCorsHeaders(res);
+    applyCorsHeaders(req, res);
     const {
       model,
       messages,
@@ -116,7 +130,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ reply: result?.response?.text?.() ?? '' });
   } catch (err) {
     console.error('❌ API error:', err);
-    applyCorsHeaders(res);
+    applyCorsHeaders(req, res);
     return res.status(500).json({ error: err?.message ?? 'Unexpected error' });
   }
 }
