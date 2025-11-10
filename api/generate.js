@@ -1,5 +1,8 @@
+import crypto from 'node:crypto';
+
 const DEFAULT_MODEL = 'gemini-2.5-flash';
 const GOOGLE_API_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta';
+const GOOGLE_SERVICE_ACCOUNT_SCOPE = 'https://www.googleapis.com/auth/generative-language';
 
 const ALLOWED_ORIGINS = [
   'https://ai-app-vert-chi.vercel.app',
@@ -9,6 +12,11 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:4173',
 ];
+
+console.log(
+  'GOOGLE_SERVICE_ACCOUNT available:',
+  Boolean(process.env.GOOGLE_SERVICE_ACCOUNT)
+);
 
 const applyCorsHeaders = (req, res) => {
   const origin = req.headers.origin;
@@ -75,14 +83,115 @@ const buildRequestBody = ({ userPrompt, imageBase64, temperature, topP, maxOutpu
   };
 };
 
-const callGeminiRest = async ({ modelId, requestBody, apiKey }) => {
+let cachedServiceAccount = null;
+let cachedAccessToken = null;
+let cachedAccessTokenExpiry = 0;
+
+const base64UrlEncode = (input) =>
+  Buffer.from(typeof input === 'string' ? input : JSON.stringify(input))
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+
+const loadServiceAccount = () => {
+  if (cachedServiceAccount) {
+    return cachedServiceAccount;
+  }
+
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT;
+  if (!raw) {
+    throw new Error('Missing GOOGLE_SERVICE_ACCOUNT environment variable');
+  }
+
+  try {
+    cachedServiceAccount = JSON.parse(raw);
+    return cachedServiceAccount;
+  } catch (error) {
+    throw new Error(`Invalid GOOGLE_SERVICE_ACCOUNT JSON: ${error.message}`);
+  }
+};
+
+const getAccessToken = async () => {
+  const serviceAccount = loadServiceAccount();
+  const nowInSeconds = Math.floor(Date.now() / 1000);
+
+  if (cachedAccessToken && cachedAccessTokenExpiry - 60 > nowInSeconds) {
+    return cachedAccessToken;
+  }
+
+  const header = {
+    alg: 'RS256',
+    typ: 'JWT',
+  };
+
+  const payload = {
+    iss: serviceAccount.client_email,
+    sub: serviceAccount.client_email,
+    scope: GOOGLE_SERVICE_ACCOUNT_SCOPE,
+    aud: serviceAccount.token_uri,
+    exp: nowInSeconds + 3600,
+    iat: nowInSeconds,
+  };
+
+  if (!serviceAccount.private_key || !serviceAccount.client_email || !serviceAccount.token_uri) {
+    throw new Error('Service account JSON missing required fields');
+  }
+
+  const headerSegment = base64UrlEncode(header);
+  const payloadSegment = base64UrlEncode(payload);
+  const signingInput = `${headerSegment}.${payloadSegment}`;
+
+  const signature = crypto
+    .createSign('RSA-SHA256')
+    .update(signingInput)
+    .sign(serviceAccount.private_key, 'base64');
+
+  const assertion = `${signingInput}.${signature
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')}`;
+
+  const tokenResponse = await fetch(serviceAccount.token_uri, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion,
+    }),
+  });
+
+  if (!tokenResponse.ok) {
+    const errorPayload = await tokenResponse.text();
+    throw new Error(
+      `Failed to exchange service account JWT for access token (${tokenResponse.status}): ${errorPayload}`
+    );
+  }
+
+  const tokenJson = await tokenResponse.json();
+  const accessToken = tokenJson?.access_token;
+  const expiresIn = tokenJson?.expires_in ?? 3600;
+
+  if (!accessToken) {
+    throw new Error('Access token missing in token response');
+  }
+
+  cachedAccessToken = accessToken;
+  cachedAccessTokenExpiry = nowInSeconds + Math.min(expiresIn, 3600);
+
+  return accessToken;
+};
+
+const callGeminiRest = async ({ modelId, requestBody, accessToken }) => {
   const endpoint = `${GOOGLE_API_ENDPOINT}/models/${encodeURIComponent(modelId)}:generateContent`;
 
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
+      Authorization: `Bearer ${accessToken}`,
     },
     body: JSON.stringify(requestBody),
   });
@@ -127,10 +236,7 @@ export default async function handler(req, res) {
     const { model, userPrompt, imageBase64, temperature, top_p: topP, maxOutputTokens } =
       parseBody(req.body);
 
-    const apiKey = process.env.GOOGLE_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: 'Missing GOOGLE_API_KEY' });
-    }
+    const accessToken = await getAccessToken();
 
     const requestedModel =
       typeof model === 'string' && model.trim().length > 0 ? model.trim() : DEFAULT_MODEL;
@@ -146,7 +252,7 @@ export default async function handler(req, res) {
     const result = await callGeminiRest({
       modelId: requestedModel,
       requestBody,
-      apiKey,
+      accessToken,
     });
 
     if (result.ok) {
@@ -171,7 +277,7 @@ export default async function handler(req, res) {
       const fallback = await callGeminiRest({
         modelId: DEFAULT_MODEL,
         requestBody,
-        apiKey,
+        accessToken,
       });
 
       if (fallback.ok) {
