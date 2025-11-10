@@ -451,88 +451,66 @@ function App() {
           { merge: true }
         );
 
-        const payloadMessages = [
-          ...(settings.instructions
-            ? [{ role: 'system', content: settings.instructions }]
-            : []),
-          ...updatedMessages.map((message) => ({
-            role: message.role,
-            content: message.content,
-            imageBase64: message.imageBase64 ?? null,
-          })),
-        ];
+        const meta = getModelMeta(selectedModelMeta.value);
+        console.log(
+          '📡 Chiamata API /api/generate con metodo: POST e modello:',
+          selectedModelMeta.value,
+          'supportsImages:',
+          meta.supportsImages
+        );
 
-        const invokeModel = async (modelId, allowFallback = true) => {
-          const meta = getModelMeta(modelId);
-          console.log('🧩 Model selected:', modelId, 'supportsImages:', meta.supportsImages);
+        const response = await fetch('/api/generate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: selectedModelMeta.value,
+            userPrompt: content,
+            imageBase64: meta.supportsImages ? imageBase64 ?? null : null,
+            temperature: settings.temperature,
+            top_p: settings.topP,
+            maxOutputTokens: 2048,
+          }),
+        });
 
-          const response = await fetch('/api/generate', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              model: modelId,
-              messages: payloadMessages,
-              temperature: settings.temperature,
-              top_p: settings.topP,
-              max_output_tokens: 2048,
-              imageBase64: imageBase64 ?? null,
-            }),
-          });
+        if (!response.ok) {
+          const errText = await response.text().catch(() => '');
+          console.error('❌ Errore API:', response.status, errText);
 
-          if (!response.ok) {
-            const errText = await response.text().catch(() => '');
-            console.error('❌ Errore API:', response.status, errText);
-
-            const isModelUnavailable =
-              response.status === 404 ||
-              response.status === 400 ||
-              /model/i.test(errText ?? '') ||
-              /not\s+found/i.test(errText ?? '');
-
-            if (allowFallback && modelId !== DEFAULT_MODEL && isModelUnavailable) {
-              console.warn('⚠️ Modello non disponibile, fallback a', DEFAULT_MODEL);
-              setError('⚠️ Modello non disponibile, riuso flash-standard.');
-              setSettings((prev) => ({ ...prev, model: DEFAULT_MODEL }));
-              return invokeModel(DEFAULT_MODEL, false);
-            }
-
-            let readableMessage = 'Errore sconosciuto';
-            switch (response.status) {
-              case 405:
-                readableMessage = 'Metodo non consentito (405). Controlla il backend.';
-                break;
-              case 429:
-                readableMessage = 'Troppe richieste. Attendi qualche secondo.';
-                break;
-              case 403:
-                readableMessage = 'Accesso negato o chiave API non valida.';
-                break;
-              case 500:
-                readableMessage = 'Errore interno del server (500).';
-                break;
-              default:
-                readableMessage = `Errore API (${response.status}).`;
-            }
-            setError(`⚠️ ${readableMessage}`);
-            return null;
+          let readableMessage = 'Errore sconosciuto';
+          switch (response.status) {
+            case 405:
+              readableMessage = 'Errore API: metodo non consentito (405). Controlla il backend.';
+              break;
+            case 403:
+              readableMessage = 'Accesso negato o chiave API non valida (403).';
+              break;
+            case 429:
+              readableMessage = 'Troppe richieste. Attendi qualche secondo (429).';
+              break;
+            case 500:
+              readableMessage = 'Errore interno del server (500).';
+              break;
+            default:
+              readableMessage = `Errore API (${response.status}).`;
           }
-
-          const payload = await response.json();
-          const replyText = payload?.reply ?? payload?.text ?? '';
-          if (!replyText) {
-            throw new Error('La risposta del modello è vuota o non valida.');
-          }
-          console.log('✅ Risposta API:', payload);
-          return replyText;
-        };
-
-        const replyText = await invokeModel(selectedModelMeta.value, true);
-        if (!replyText) {
+          setError(`⚠️ ${readableMessage}`);
           return;
         }
 
+        const payload = await response.json();
+        if (payload?.fallbackApplied && selectedModelMeta.value !== DEFAULT_MODEL) {
+          setSettings((prev) => ({ ...prev, model: DEFAULT_MODEL }));
+          setError('⚠️ Modello non disponibile, riuso flash-standard.');
+        }
+
+        const replyText = payload?.reply;
+        if (!replyText) {
+          throw new Error('La risposta del modello è vuota o non valida.');
+        }
+
+        console.log('✅ Risposta API:', payload);
         await simulateStreaming(replyText);
 
         const assistantMessage = {
