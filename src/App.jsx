@@ -24,9 +24,10 @@ import Login from './components/Login.jsx';
 import Chat from './components/Chat.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
 import { auth, db } from './firebase.js';
+import { DEFAULT_MODEL, MODEL_OPTIONS, getModelMeta } from './constants/models.js';
 
 const DEFAULT_SETTINGS = {
-  model: 'gemini-1.5-flash',
+  model: DEFAULT_MODEL,
   temperature: 0.8,
   topP: 0.9,
   instructions: '',
@@ -51,6 +52,8 @@ function App() {
     () => chats.find((chat) => chat.id === activeChatId) ?? null,
     [chats, activeChatId]
   );
+
+  const selectedModelMeta = useMemo(() => getModelMeta(settings.model), [settings.model]);
 
   useEffect(() => {
     if (debugLoggedRef.current) {
@@ -267,7 +270,7 @@ function App() {
       return undefined;
     }
 
-    const timeout = setTimeout(() => {
+      const timeout = setTimeout(() => {
       const userDocRef = doc(db, 'users', user.uid);
       setDoc(
         userDocRef,
@@ -382,7 +385,7 @@ function App() {
   }, [error]);
 
   const handleSendMessage = useCallback(
-    async (rawContent) => {
+    async ({ text: rawContent, imageBase64 }) => {
       if (!user) {
         throw new Error('Devi essere autenticato per inviare messaggi.');
       }
@@ -419,6 +422,7 @@ function App() {
           role: 'user',
           content,
           timestamp: Date.now(),
+          imageBase64: imageBase64 ?? null,
         };
 
         const updatedMessages = [...(existingChat.messages ?? []), userMessage];
@@ -454,54 +458,81 @@ function App() {
           ...updatedMessages.map((message) => ({
             role: message.role,
             content: message.content,
+            imageBase64: message.imageBase64 ?? null,
           })),
         ];
 
-        console.log('📡 Chiamata API /api/generate con metodo:', 'POST');
-        const response = await fetch('/api/generate', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: settings.model,
-            messages: payloadMessages,
-            temperature: settings.temperature,
-            top_p: settings.topP,
-            imageBase64: null,
-          }),
-        });
+        const invokeModel = async (modelId, allowFallback = true) => {
+          const meta = getModelMeta(modelId);
+          console.log('🧩 Model selected:', modelId, 'supportsImages:', meta.supportsImages);
 
-        if (!response.ok) {
-          const errText = await response.text().catch(() => '');
-          console.error('❌ Errore API:', response.status, errText);
-          let readableMessage = 'Errore sconosciuto';
-          switch (response.status) {
-            case 405:
-              readableMessage = 'Metodo non consentito (405). Controlla il backend.';
-              break;
-            case 429:
-              readableMessage = 'Troppe richieste. Attendi qualche secondo.';
-              break;
-            case 403:
-              readableMessage = 'Accesso negato o chiave API non valida.';
-              break;
-            case 500:
-              readableMessage = 'Errore interno del server (500).';
-              break;
-            default:
-              readableMessage = `Errore API (${response.status}).`;
+          const response = await fetch('/api/generate', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: modelId,
+              messages: payloadMessages,
+              temperature: settings.temperature,
+              top_p: settings.topP,
+              max_output_tokens: 2048,
+              imageBase64: imageBase64 ?? null,
+            }),
+          });
+
+          if (!response.ok) {
+            const errText = await response.text().catch(() => '');
+            console.error('❌ Errore API:', response.status, errText);
+
+            const isModelUnavailable =
+              response.status === 404 ||
+              response.status === 400 ||
+              /model/i.test(errText ?? '') ||
+              /not\s+found/i.test(errText ?? '');
+
+            if (allowFallback && modelId !== DEFAULT_MODEL && isModelUnavailable) {
+              console.warn('⚠️ Modello non disponibile, fallback a', DEFAULT_MODEL);
+              setError('⚠️ Modello non disponibile, riuso flash-standard.');
+              setSettings((prev) => ({ ...prev, model: DEFAULT_MODEL }));
+              return invokeModel(DEFAULT_MODEL, false);
+            }
+
+            let readableMessage = 'Errore sconosciuto';
+            switch (response.status) {
+              case 405:
+                readableMessage = 'Metodo non consentito (405). Controlla il backend.';
+                break;
+              case 429:
+                readableMessage = 'Troppe richieste. Attendi qualche secondo.';
+                break;
+              case 403:
+                readableMessage = 'Accesso negato o chiave API non valida.';
+                break;
+              case 500:
+                readableMessage = 'Errore interno del server (500).';
+                break;
+              default:
+                readableMessage = `Errore API (${response.status}).`;
+            }
+            setError(`⚠️ ${readableMessage}`);
+            return null;
           }
-          setError(`⚠️ ${readableMessage}`);
+
+          const payload = await response.json();
+          const replyText = payload?.reply ?? payload?.text ?? '';
+          if (!replyText) {
+            throw new Error('La risposta del modello è vuota o non valida.');
+          }
+          console.log('✅ Risposta API:', payload);
+          return replyText;
+        };
+
+        const replyText = await invokeModel(selectedModelMeta.value, true);
+        if (!replyText) {
           return;
         }
 
-        const payload = await response.json();
-        const replyText = payload?.reply ?? payload?.text ?? '';
-        if (!replyText) {
-          throw new Error('La risposta del modello è vuota o non valida.');
-        }
-        console.log('✅ Risposta API:', payload);
         await simulateStreaming(replyText);
 
         const assistantMessage = {
@@ -643,6 +674,7 @@ function App() {
             isGenerating={isGenerating}
             streamingText={streamingText}
             error={error}
+            supportsImages={selectedModelMeta.supportsImages}
           />
         </div>
 

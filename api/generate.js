@@ -3,16 +3,28 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 const formatMessages = (messages = []) =>
   Array.isArray(messages)
     ? messages
-        .filter(
-          (message) =>
-            typeof message?.role === 'string' &&
-            typeof message?.content === 'string' &&
-            message.content.trim().length > 0
-        )
-        .map((message) => ({
-          role: message.role,
-          parts: [{ text: message.content }],
-        }))
+        .filter((message) => typeof message?.role === 'string')
+        .map((message) => {
+          const parts = [];
+
+          if (typeof message?.content === 'string' && message.content.trim().length > 0) {
+            parts.push({ text: message.content });
+          }
+
+          if (typeof message?.imageBase64 === 'string' && message.imageBase64.trim().length > 0) {
+            parts.push({
+              inlineData: {
+                mimeType: 'image/png',
+                data: message.imageBase64,
+              },
+            });
+          }
+
+          return {
+            role: message.role,
+            parts: parts.length > 0 ? parts : [{ text: '' }],
+          };
+        })
     : [];
 
 export default async function handler(req, res) {
@@ -23,15 +35,25 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { model, messages, temperature, top_p: topP, imageBase64 } = req.body ?? {};
+    const {
+      model,
+      messages,
+      temperature,
+      top_p: topP,
+      imageBase64,
+      max_output_tokens: maxOutputTokensLegacy,
+      maxOutputTokens,
+    } = req.body ?? {};
 
     const apiKey = process.env.GOOGLE_API_KEY;
     if (!apiKey) {
       throw new Error('Missing GOOGLE_API_KEY');
     }
 
+    const selectedModel = typeof model === 'string' && model.trim().length > 0 ? model.trim() : 'gemini-2.5-flash';
+
     const genAI = new GoogleGenerativeAI(apiKey);
-    const gemini = genAI.getGenerativeModel({ model: model || 'gemini-1.5-flash' });
+    const gemini = genAI.getGenerativeModel({ model: selectedModel });
 
     const contents = formatMessages(messages);
 
@@ -58,6 +80,16 @@ export default async function handler(req, res) {
     }
     if (typeof topP === 'number') {
       generationConfig.topP = topP;
+    }
+    const resolvedMaxTokens =
+      typeof maxOutputTokens === 'number'
+        ? maxOutputTokens
+        : typeof maxOutputTokensLegacy === 'number'
+        ? maxOutputTokensLegacy
+        : undefined;
+
+    if (typeof resolvedMaxTokens === 'number' && Number.isFinite(resolvedMaxTokens)) {
+      generationConfig.maxOutputTokens = resolvedMaxTokens;
     }
 
     const result = await gemini.generateContent({

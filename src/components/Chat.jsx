@@ -16,9 +16,12 @@ function Chat({
   isGenerating,
   streamingText,
   error,
+  supportsImages = false,
 }) {
   const [input, setInput] = useState('');
   const [localError, setLocalError] = useState('');
+  const [imageBase64, setImageBase64] = useState(null);
+  const [imageName, setImageName] = useState('');
   const messagesEndRef = useRef(null);
 
   const hasMessages = Boolean(chat?.messages?.length);
@@ -38,6 +41,13 @@ function Chat({
     return [...chat.messages].sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
   }, [chat?.messages]);
 
+  useEffect(() => {
+    if (!supportsImages && imageBase64) {
+      setImageBase64(null);
+      setImageName('');
+    }
+  }, [supportsImages, imageBase64]);
+
   const handleSubmit = async (event) => {
     event.preventDefault();
 
@@ -47,11 +57,56 @@ function Chat({
     }
 
     try {
-      await onSendMessage?.(input.trim());
+      await onSendMessage?.({
+        text: input.trim(),
+        imageBase64: imageBase64 ?? null,
+      });
       setInput('');
+      setImageBase64(null);
+      setImageName('');
     } catch (err) {
       setLocalError(err?.message ?? 'Invio messaggio fallito.');
     }
+  };
+
+  const handleFileChange = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    if (!file.type.startsWith('image/')) {
+      setLocalError('Seleziona un file immagine valido.');
+      return;
+    }
+
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result;
+          if (typeof result === 'string') {
+            const commaIndex = result.indexOf(',');
+            resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+          } else {
+            reject(new Error('Conversione immagine fallita.'));
+          }
+        };
+        reader.onerror = () => reject(new Error('Impossibile leggere il file.'));
+        reader.readAsDataURL(file);
+      });
+
+      setImageBase64(base64);
+      setImageName(file.name);
+      setLocalError('');
+    } catch (conversionError) {
+      setLocalError(conversionError?.message ?? 'Impossibile caricare l’immagine.');
+    }
+  };
+
+  const handleRemoveImage = () => {
+    setImageBase64(null);
+    setImageName('');
   };
 
   return (
@@ -116,6 +171,13 @@ function Chat({
                   }`}
                 >
                   <p className="whitespace-pre-wrap">{message.content}</p>
+                  {message.imageBase64 ? (
+                    <img
+                      src={`data:image/png;base64,${message.imageBase64}`}
+                      alt="Allegato utente"
+                      className="mt-3 max-h-48 w-auto rounded-lg border border-slate-200"
+                    />
+                  ) : null}
                   <span className="mt-2 block text-xs font-medium text-slate-400">
                     {formatTime(message.timestamp)}
                   </span>
@@ -150,6 +212,37 @@ function Chat({
             placeholder="Scrivi il tuo messaggio..."
             className="w-full resize-none rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"
           />
+
+          {supportsImages ? (
+            <div className="flex flex-col gap-2 text-xs text-slate-500">
+              <label className="inline-flex w-fit cursor-pointer items-center gap-2 rounded-lg border border-dashed border-emerald-300 px-3 py-2 font-medium text-emerald-600 transition hover:border-emerald-400 hover:bg-emerald-50">
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleFileChange}
+                  className="hidden"
+                  disabled={isGenerating}
+                />
+                📎 Allega immagine (PNG/JPEG)
+              </label>
+              {imageBase64 ? (
+                <div className="flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-slate-600">
+                  <span className="truncate pr-3 text-xs font-medium">{imageName || 'Immagine allegata'}</span>
+                  <button
+                    type="button"
+                    onClick={handleRemoveImage}
+                    className="text-xs font-semibold text-emerald-600 hover:text-emerald-500"
+                  >
+                    Rimuovi
+                  </button>
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-400">
+                  Imm. abilitate per questo modello — allega un file opzionale.
+                </p>
+              )}
+            </div>
+          ) : null}
 
           {(localError || error) && (
             <p className="text-xs text-rose-500">{localError || error}</p>

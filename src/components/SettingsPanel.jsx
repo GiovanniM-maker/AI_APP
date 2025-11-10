@@ -1,16 +1,10 @@
 import { useMemo } from 'react';
-
-const MODEL_OPTIONS = [
-  { value: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash' },
-  { value: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro' },
-  { value: 'gemini-1.0-pro', label: 'Gemini 1.0 Pro' },
-  { value: 'gemini-pro', label: 'Gemini Pro (Legacy)' },
-];
+import { MODEL_OPTIONS } from '../constants/models.js';
 
 function SettingsPanel({ settings, onUpdate, disabled }) {
   const safeSettings = useMemo(
     () => ({
-      model: settings?.model ?? MODEL_OPTIONS[0].value,
+      model: settings?.model ?? MODEL_OPTIONS[0]?.value,
       temperature: settings?.temperature ?? 0.8,
       topP: settings?.topP ?? 0.9,
       instructions: settings?.instructions ?? '',
@@ -39,9 +33,14 @@ function SettingsPanel({ settings, onUpdate, disabled }) {
             {MODEL_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>
                 {option.label}
+                {option.supportsImages ? ' • Imm.' : ''}
               </option>
             ))}
           </select>
+          <p className="text-xs text-slate-400">
+            {MODEL_OPTIONS.find((model) => model.value === safeSettings.model)?.description ??
+              'Seleziona il modello Gemini / Imagen desiderato.'}
+          </p>
         </label>
 
         <label className="flex flex-col gap-3">
