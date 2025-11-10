@@ -468,18 +468,40 @@ function App() {
             messages: payloadMessages,
             temperature: settings.temperature,
             top_p: settings.topP,
+            imageBase64: null,
           }),
         });
 
         if (!response.ok) {
           const errText = await response.text().catch(() => '');
           console.error('❌ Errore API:', response.status, errText);
-          setError(`Errore API (${response.status}): impossibile generare la risposta`);
+          let readableMessage = 'Errore sconosciuto';
+          switch (response.status) {
+            case 405:
+              readableMessage = 'Metodo non consentito (405). Controlla il backend.';
+              break;
+            case 429:
+              readableMessage = 'Troppe richieste. Attendi qualche secondo.';
+              break;
+            case 403:
+              readableMessage = 'Accesso negato o chiave API non valida.';
+              break;
+            case 500:
+              readableMessage = 'Errore interno del server (500).';
+              break;
+            default:
+              readableMessage = `Errore API (${response.status}).`;
+          }
+          setError(`⚠️ ${readableMessage}`);
           return;
         }
 
         const payload = await response.json();
         const replyText = payload?.reply ?? payload?.text ?? '';
+        if (!replyText) {
+          throw new Error('La risposta del modello è vuota o non valida.');
+        }
+        console.log('✅ Risposta API:', payload);
         await simulateStreaming(replyText);
 
         const assistantMessage = {
@@ -520,7 +542,7 @@ function App() {
           typeof err?.message === 'string' && err.message.trim().length > 0
             ? err.message
             : fallbackMessage;
-        setError(friendlyMessage);
+        setError(`⚠️ ${friendlyMessage}`);
         resetStreaming();
       } finally {
         setIsGenerating(false);

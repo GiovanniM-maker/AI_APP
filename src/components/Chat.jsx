@@ -76,6 +76,13 @@ function Chat({
         </button>
       </header>
 
+      {/* Per rimuovere o personalizzare il banner d'errore condiviso, aggiorna la gestione dello stato `error` in App.jsx. */}
+      {error ? (
+        <div className="mx-6 mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 shadow-sm">
+          {error}
+        </div>
+      ) : null}
+
       <div className="flex-1 overflow-y-auto px-6 py-4">
         {orderedMessages.length === 0 && !streamingText ? (
           <div className="flex h-full flex-col items-center justify-center text-center text-slate-400">
@@ -144,7 +151,6 @@ function Chat({
             className="w-full resize-none rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"
           />
 
-          {/* Per rimuovere o personalizzare il messaggio d'errore, modifica la logica di stato `error` in App.jsx. */}
           {(localError || error) && (
             <p className="text-xs text-rose-500">{localError || error}</p>
           )}
