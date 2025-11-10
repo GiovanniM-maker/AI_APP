@@ -1,66 +1,46 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-const parseMessages = (messages = []) =>
+const formatMessages = (messages = []) =>
   Array.isArray(messages)
     ? messages
-        .filter((message) => typeof message?.text === 'string' && message.text.trim().length > 0)
+        .filter(
+          (message) =>
+            typeof message?.role === 'string' &&
+            typeof message?.content === 'string' &&
+            message.content.trim().length > 0
+        )
         .map((message) => ({
-          role: message.role ?? 'user',
-          parts: [{ text: message.text }],
+          role: message.role,
+          parts: [{ text: message.content }],
         }))
     : [];
 
-export default async function handler(request, response) {
-  response.setHeader('Access-Control-Allow-Origin', '*');
-  response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  if (request.method === 'OPTIONS') {
-    return response.status(204).end();
-  }
-
-  if (request.method !== 'POST') {
-    response.setHeader('Allow', ['POST', 'OPTIONS']);
-    return response.status(405).json({ error: 'Method not allowed' });
-  }
-
-  const apiKey = process.env.GOOGLE_API_KEY;
-
-  if (!apiKey) {
-    return response.status(500).json({ error: 'Missing GOOGLE_API_KEY environment variable' });
+export default async function handler(req, res) {
+  if (req.method !== 'POST') {
+    return res
+      .status(405)
+      .json({ error: 'Method Not Allowed. Use POST.' });
   }
 
   try {
-    const { model = 'gemini-1.5-flash', messages, temperature, top_p: topP, imageBase64 } =
-      typeof request.body === 'string' ? JSON.parse(request.body) : request.body ?? {};
+    const { model, messages, temperature, top_p: topP, imageBase64 } = req.body ?? {};
 
-    const generationConfig = {};
-    if (typeof temperature === 'number') {
-      generationConfig.temperature = temperature;
-    }
-    if (typeof topP === 'number') {
-      generationConfig.topP = topP;
+    const apiKey = process.env.GOOGLE_API_KEY;
+    if (!apiKey) {
+      throw new Error('Missing GOOGLE_API_KEY');
     }
 
     const genAI = new GoogleGenerativeAI(apiKey);
-    const geminiModel = genAI.getGenerativeModel(
-      Object.keys(generationConfig).length > 0
-        ? { model, generationConfig }
-        : { model }
-    );
+    const gemini = genAI.getGenerativeModel({ model: model || 'gemini-1.5-flash' });
 
-    const contents = parseMessages(messages);
+    const contents = formatMessages(messages);
 
     if (imageBase64) {
       contents.push({
         role: 'user',
         parts: [
-          {
-            inlineData: {
-              data: imageBase64,
-              mimeType: 'image/png',
-            },
-          },
+          { text: 'Analyze this image:' },
+          { inlineData: { mimeType: 'image/png', data: imageBase64 } },
         ],
       });
     }
@@ -72,17 +52,23 @@ export default async function handler(request, response) {
       });
     }
 
-    const result = await geminiModel.generateContent({
+    const generationConfig = {};
+    if (typeof temperature === 'number') {
+      generationConfig.temperature = temperature;
+    }
+    if (typeof topP === 'number') {
+      generationConfig.topP = topP;
+    }
+
+    const result = await gemini.generateContent({
       contents,
+      generationConfig,
     });
 
-    const text = result?.response?.text?.();
-
-    return response.status(200).json({ text: text ?? '' });
-  } catch (error) {
-    console.error('Gemini API error:', error);
-    const message = error?.message ?? 'Unexpected error';
-    return response.status(500).json({ error: message });
+    return res.status(200).json({ reply: result?.response?.text?.() ?? '' });
+  } catch (err) {
+    console.error('❌ API error:', err);
+    return res.status(500).json({ error: err?.message ?? 'Unexpected error' });
   }
 }
 
