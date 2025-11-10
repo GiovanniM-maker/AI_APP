@@ -144,6 +144,7 @@ function Chat({
             className="w-full resize-none rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"
           />
 
+          {/* Per rimuovere o personalizzare il messaggio d'errore, modifica la logica di stato `error` in App.jsx. */}
           {(localError || error) && (
             <p className="text-xs text-rose-500">{localError || error}</p>
           )}

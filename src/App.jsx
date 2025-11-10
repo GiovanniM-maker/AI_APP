@@ -40,7 +40,7 @@ function App() {
   const [isSettingsLoaded, setIsSettingsLoaded] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [streamingText, setStreamingText] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
 
   const chatsListenerRef = useRef(null);
@@ -245,7 +245,7 @@ function App() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
-      setError('');
+      setError(null);
 
       if (currentUser) {
         loadUserPreferences(currentUser.uid);
@@ -360,17 +360,26 @@ function App() {
   const handleSelectChat = useCallback((chatId) => {
     setActiveChatId(chatId);
     resetStreaming();
-    setError('');
+    setError(null);
   }, [resetStreaming]);
 
   const handleStartNewChat = useCallback(async () => {
     resetStreaming();
-    setError('');
+    setError(null);
     const newChatId = await ensureChatExists(null, 'Nuova chat');
     if (newChatId) {
       setActiveChatId(newChatId);
     }
   }, [ensureChatExists, resetStreaming]);
+
+  useEffect(() => {
+    if (!error) {
+      return undefined;
+    }
+
+    const timer = setTimeout(() => setError(null), 8000);
+    return () => clearTimeout(timer);
+  }, [error]);
 
   const handleSendMessage = useCallback(
     async (rawContent) => {
@@ -381,7 +390,7 @@ function App() {
       const content = rawContent.trim();
       if (!content) return;
 
-      setError('');
+      setError(null);
       setIsGenerating(true);
 
       try {
@@ -440,14 +449,15 @@ function App() {
 
         const payloadMessages = [
           ...(settings.instructions
-            ? [{ role: 'system', text: settings.instructions }]
+            ? [{ role: 'system', content: settings.instructions }]
             : []),
           ...updatedMessages.map((message) => ({
             role: message.role,
-            text: message.content,
+            content: message.content,
           })),
         ];
 
+        console.log('📡 Chiamata API /api/generate con metodo:', 'POST');
         const response = await fetch('/api/generate', {
           method: 'POST',
           headers: {
@@ -462,17 +472,19 @@ function App() {
         });
 
         if (!response.ok) {
-          const payload = await response.json().catch(() => ({}));
-          throw new Error(payload?.error ?? `Request failed with ${response.status}`);
+          const errText = await response.text().catch(() => '');
+          console.error('❌ Errore API:', response.status, errText);
+          setError(`Errore API (${response.status}): impossibile generare la risposta`);
+          return;
         }
 
         const payload = await response.json();
-        const rawText = payload?.text ?? '';
-        await simulateStreaming(rawText);
+        const replyText = payload?.reply ?? payload?.text ?? '';
+        await simulateStreaming(replyText);
 
         const assistantMessage = {
           role: 'assistant',
-          content: rawText || 'Nessuna risposta dal modello.',
+          content: replyText || 'Nessuna risposta dal modello.',
           timestamp: Date.now(),
         };
 
@@ -502,10 +514,14 @@ function App() {
 
         resetStreaming();
       } catch (err) {
-        console.error('Errore durante l\'invio del messaggio', err);
-        setError(err?.message ?? 'Invio messaggio fallito.');
+        console.error('❌ Errore di rete o durante la generazione:', err);
+        const fallbackMessage = 'Errore di connessione. Riprova tra poco.';
+        const friendlyMessage =
+          typeof err?.message === 'string' && err.message.trim().length > 0
+            ? err.message
+            : fallbackMessage;
+        setError(friendlyMessage);
         resetStreaming();
-        throw err;
       } finally {
         setIsGenerating(false);
       }
