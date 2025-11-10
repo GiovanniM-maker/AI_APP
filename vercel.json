@@ -1,9 +1,4 @@
 {
-  "functions": {
-    "api/**/*.js": {
-      "runtime": "vercel-nodejs@18.0.0"
-    }
-  },
   "builds": [
     { "src": "api/**/*.js", "use": "@vercel/node" },
     { "src": "vite.config.js", "use": "@vercel/static-build" }
