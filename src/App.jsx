@@ -371,6 +371,37 @@ const DEFAULT_SETTINGS = {
   instructions: '',
 };
 
+const isLikelyCorsError = (error) => {
+  if (!error) {
+    return false;
+  }
+
+  const code = typeof error?.code === 'string' ? error.code.toLowerCase() : '';
+  if (code.includes('cors')) {
+    return true;
+  }
+
+  if (code === 'storage/unauthorized' || code === 'storage/retry-limit-exceeded') {
+    return true;
+  }
+
+  const message = typeof error?.message === 'string' ? error.message.toLowerCase() : '';
+  if (!message) {
+    return false;
+  }
+
+  const corsIndicators = [
+    'cors',
+    'no access-control-allow-origin',
+    'blocked by cors policy',
+    'preflight',
+    'cross-origin',
+    'permission denied',
+  ];
+
+  return corsIndicators.some((indicator) => message.includes(indicator));
+};
+
 function App() {
   const [user, setUser] = useState(null);
   const [chats, setChats] = useState([]);
@@ -966,12 +997,18 @@ function App() {
         resetStreaming();
       } catch (err) {
         console.error('❌ Errore di rete o durante la generazione:', err);
-        const fallbackMessage = 'Errore di connessione. Riprova tra poco.';
-        const friendlyMessage =
-          typeof err?.message === 'string' && err.message.trim().length > 0
-            ? err.message
-            : fallbackMessage;
-        setError(`⚠️ ${friendlyMessage}`);
+
+        if (isLikelyCorsError(err)) {
+          setError('⚠️ Errore CORS su Firebase Storage. Verifica la configurazione CORS del bucket.');
+        } else {
+          const fallbackMessage = 'Errore di connessione. Riprova tra poco.';
+          const friendlyMessage =
+            typeof err?.message === 'string' && err.message.trim().length > 0
+              ? err.message
+              : fallbackMessage;
+          setError(`⚠️ ${friendlyMessage}`);
+        }
+
         resetStreaming();
       } finally {
         setIsGenerating(false);
