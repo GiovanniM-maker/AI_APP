@@ -9,6 +9,161 @@ function formatTime(timestamp) {
   }
 }
 
+const MAX_IMAGE_INLINE_BYTES = 900_000;
+const MAX_IMAGE_DIMENSIONS = [1600, 1280, 1024, 720, 512];
+const JPEG_QUALITY_STEPS = [0.88, 0.75, 0.65, 0.5];
+
+const readFileAsBase64 = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result === 'string') {
+        const commaIndex = result.indexOf(',');
+        resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+      } else {
+        reject(new Error('Conversione immagine fallita.'));
+      }
+    };
+    reader.onerror = () => reject(new Error('Impossibile leggere il file.'));
+    reader.readAsDataURL(file);
+  });
+
+const estimateBase64Bytes = (base64) => {
+  if (typeof base64 !== 'string' || base64.length === 0) {
+    return 0;
+  }
+  const sanitized = base64.replace(/=+$/, '');
+  return Math.floor((sanitized.length * 3) / 4);
+};
+
+const generateCompressedBase64 = (file) =>
+  new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      if (!image.width || !image.height) {
+        reject(new Error('Impossibile determinare le dimensioni dell’immagine.'));
+        return;
+      }
+
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      if (!context) {
+        reject(new Error('Canvas non supportato dal browser.'));
+        return;
+      }
+
+      context.imageSmoothingQuality = 'high';
+
+      const originalMimeType =
+        typeof file.type === 'string' && file.type.startsWith('image/')
+          ? file.type
+          : 'image/jpeg';
+
+      const mimeCandidates =
+        originalMimeType === 'image/png'
+          ? ['image/png', 'image/jpeg']
+          : [originalMimeType, 'image/jpeg'];
+
+      const attempts = [];
+
+      for (const maxDimension of MAX_IMAGE_DIMENSIONS) {
+        const scale = Math.min(maxDimension / image.width, maxDimension / image.height, 1);
+        const targetWidth = Math.max(1, Math.round(image.width * scale));
+        const targetHeight = Math.max(1, Math.round(image.height * scale));
+
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        context.clearRect(0, 0, targetWidth, targetHeight);
+        context.drawImage(image, 0, 0, targetWidth, targetHeight);
+
+        for (const mime of mimeCandidates) {
+          const qualitySteps = mime === 'image/jpeg' ? JPEG_QUALITY_STEPS : [undefined];
+          for (const quality of qualitySteps) {
+            const dataUrl = canvas.toDataURL(mime, quality);
+            const commaIndex = dataUrl.indexOf(',');
+            const base64 = commaIndex >= 0 ? dataUrl.slice(commaIndex + 1) : dataUrl;
+            const bytes = estimateBase64Bytes(base64);
+
+            attempts.push({
+              base64,
+              bytes,
+              mimeType: mime,
+              width: targetWidth,
+              height: targetHeight,
+            });
+
+            if (bytes <= MAX_IMAGE_INLINE_BYTES) {
+              return resolve({
+                data: base64,
+                mimeType: mime,
+                width: targetWidth,
+                height: targetHeight,
+              });
+            }
+          }
+        }
+      }
+
+      const smallest =
+        attempts.length > 0
+          ? attempts.reduce((prev, current) => (current.bytes < prev.bytes ? current : prev))
+          : null;
+
+      if (smallest) {
+        resolve({
+          data: smallest.base64,
+          mimeType: smallest.mimeType,
+          width: smallest.width,
+          height: smallest.height,
+        });
+        return;
+      }
+
+      reject(new Error('Impossibile comprimere l’immagine selezionata.'));
+    };
+
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('Impossibile elaborare l’immagine selezionata.'));
+    };
+
+    image.src = objectUrl;
+  });
+
+const processImageFile = async (file) => {
+  const fallbackMime =
+    typeof file.type === 'string' && file.type.startsWith('image/')
+      ? file.type
+      : 'image/jpeg';
+
+  try {
+    if (file.size <= MAX_IMAGE_INLINE_BYTES * 0.7) {
+      const data = await readFileAsBase64(file);
+      const bytes = estimateBase64Bytes(data);
+      if (bytes <= MAX_IMAGE_INLINE_BYTES) {
+        return { data, mimeType: fallbackMime };
+      }
+    }
+
+    const compressed = await generateCompressedBase64(file);
+    if (compressed?.data) {
+      return {
+        data: compressed.data,
+        mimeType: compressed.mimeType ?? fallbackMime,
+      };
+    }
+
+    const fallbackData = await readFileAsBase64(file);
+    return { data: fallbackData, mimeType: fallbackMime };
+  } catch (error) {
+    const fallbackData = await readFileAsBase64(file);
+    return { data: fallbackData, mimeType: fallbackMime };
+  }
+};
+
 function Chat({
   chat,
   onSendMessage,
@@ -70,22 +225,6 @@ function Chat({
       clearAttachments();
     }
   }, [supportsImages, attachments.length, clearAttachments]);
-
-  const readFileAsBase64 = (file) =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = reader.result;
-        if (typeof result === 'string') {
-          const commaIndex = result.indexOf(',');
-          resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
-        } else {
-          reject(new Error('Conversione immagine fallita.'));
-        }
-      };
-      reader.onerror = () => reject(new Error('Impossibile leggere il file.'));
-      reader.readAsDataURL(file);
-    });
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -166,13 +305,13 @@ function Chat({
     try {
       const upcomingAttachments = await Promise.all(
         imageFiles.map(async (file) => {
-          const data = await readFileAsBase64(file);
+          const processed = await processImageFile(file);
           return {
             id: `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`,
             name: file.name,
-            mimeType: file.type || 'image/png',
+            mimeType: processed.mimeType || file.type || 'image/png',
             size: file.size,
-            data,
+            data: processed.data,
             previewUrl: URL.createObjectURL(file),
           };
         })

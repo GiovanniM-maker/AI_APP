@@ -57,6 +57,16 @@ const normalizeImages = (rawImages) => {
     .filter(Boolean);
 };
 
+const estimateBase64Bytes = (base64) => {
+  if (typeof base64 !== 'string' || base64.length === 0) {
+    return 0;
+  }
+  const sanitized = base64.replace(/=+$/, '');
+  return Math.floor((sanitized.length * 3) / 4);
+};
+
+const MAX_FIRESTORE_INLINE_BYTES = 900_000;
+
 const collectImages = (rawImages, rawParts) => {
   const normalizedImages = normalizeImages(rawImages);
 
@@ -577,6 +587,17 @@ function App() {
         (typeof firstTextPart?.text === 'string' ? firstTextPart.text.trim() : '');
 
       const sanitizedImages = collectImages(rawImages, rawParts);
+
+      const inlineBytes = sanitizedImages.reduce(
+        (sum, image) => sum + estimateBase64Bytes(image?.data ?? ''),
+        0
+      );
+
+      if (inlineBytes > MAX_FIRESTORE_INLINE_BYTES) {
+        throw new Error(
+          'Le immagini selezionate sono troppo grandi per essere salvate nella chat. Riduci la risoluzione o il numero di immagini e riprova.'
+        );
+      }
 
       if (!derivedContent && sanitizedImages.length === 0) {
         return;
