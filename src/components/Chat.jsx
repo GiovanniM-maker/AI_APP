@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 function formatTime(timestamp) {
   try {
@@ -20,9 +20,10 @@ function Chat({
 }) {
   const [input, setInput] = useState('');
   const [localError, setLocalError] = useState('');
-  const [imageBase64, setImageBase64] = useState(null);
-  const [imageName, setImageName] = useState('');
+  const [attachments, setAttachments] = useState([]);
+  const [isProcessingFiles, setIsProcessingFiles] = useState(false);
   const messagesEndRef = useRef(null);
+  const attachmentsRef = useRef([]);
 
   const hasMessages = Boolean(chat?.messages?.length);
 
@@ -42,72 +43,179 @@ function Chat({
   }, [chat?.messages]);
 
   useEffect(() => {
-    if (!supportsImages && imageBase64) {
-      setImageBase64(null);
-      setImageName('');
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+
+  useEffect(() => () => {
+    attachmentsRef.current.forEach((attachment) => {
+      if (attachment?.previewUrl) {
+        URL.revokeObjectURL(attachment.previewUrl);
+      }
+    });
+  }, []);
+
+  const clearAttachments = useCallback(() => {
+    setAttachments((prev) => {
+      prev.forEach((attachment) => {
+        if (attachment?.previewUrl) {
+          URL.revokeObjectURL(attachment.previewUrl);
+        }
+      });
+      return [];
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!supportsImages && attachments.length > 0) {
+      clearAttachments();
     }
-  }, [supportsImages, imageBase64]);
+  }, [supportsImages, attachments.length, clearAttachments]);
+
+  const readFileAsBase64 = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (typeof result === 'string') {
+          const commaIndex = result.indexOf(',');
+          resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+        } else {
+          reject(new Error('Conversione immagine fallita.'));
+        }
+      };
+      reader.onerror = () => reject(new Error('Impossibile leggere il file.'));
+      reader.readAsDataURL(file);
+    });
 
   const handleSubmit = async (event) => {
     event.preventDefault();
 
-    if (!input.trim()) {
-      setLocalError('Scrivi un messaggio prima di inviare.');
+    const trimmedText = input.trim();
+    const hasText = trimmedText.length > 0;
+    const hasImages = attachments.length > 0;
+
+    if (isProcessingFiles) {
+      setLocalError('Attendi il caricamento delle immagini prima di inviare.');
       return;
+    }
+
+    if (!hasText && !hasImages) {
+      setLocalError('Scrivi un messaggio o allega almeno un’immagine prima di inviare.');
+      return;
+    }
+
+    const messageParts = [];
+
+    if (hasText) {
+      messageParts.push({
+        type: 'text',
+        text: trimmedText,
+      });
+    }
+
+    if (hasImages) {
+      attachments.forEach(({ data, mimeType, name, size }) => {
+        if (typeof data === 'string' && data.trim().length > 0) {
+          messageParts.push({
+            type: 'image',
+            data,
+            mimeType,
+            name,
+            size,
+          });
+        }
+      });
     }
 
     try {
       await onSendMessage?.({
-        text: input.trim(),
-        imageBase64: imageBase64 ?? null,
+        text: trimmedText,
+        images: attachments.map(({ data, mimeType, name, size }) => ({
+          data,
+          mimeType,
+          name,
+          size,
+        })),
+        parts: messageParts,
       });
       setInput('');
-      setImageBase64(null);
-      setImageName('');
+      clearAttachments();
+      setLocalError('');
     } catch (err) {
       setLocalError(err?.message ?? 'Invio messaggio fallito.');
     }
   };
 
   const handleFileChange = async (event) => {
-    const file = event.target.files?.[0];
-    if (!file) {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length === 0) {
       return;
     }
 
-    if (!file.type.startsWith('image/')) {
-      setLocalError('Seleziona un file immagine valido.');
+    const imageFiles = files.filter((file) => file.type.startsWith('image/'));
+    if (imageFiles.length === 0) {
+      setLocalError('Seleziona uno o più file immagine validi.');
+      if (event.target) {
+        event.target.value = '';
+      }
       return;
     }
+
+    setIsProcessingFiles(true);
 
     try {
-      const base64 = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const result = reader.result;
-          if (typeof result === 'string') {
-            const commaIndex = result.indexOf(',');
-            resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
-          } else {
-            reject(new Error('Conversione immagine fallita.'));
-          }
-        };
-        reader.onerror = () => reject(new Error('Impossibile leggere il file.'));
-        reader.readAsDataURL(file);
-      });
+      const upcomingAttachments = await Promise.all(
+        imageFiles.map(async (file) => {
+          const data = await readFileAsBase64(file);
+          return {
+            id: `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`,
+            name: file.name,
+            mimeType: file.type || 'image/png',
+            size: file.size,
+            data,
+            previewUrl: URL.createObjectURL(file),
+          };
+        })
+      );
 
-      setImageBase64(base64);
-      setImageName(file.name);
+      setAttachments((prev) => {
+        const existingSignatures = new Set(
+          prev.map((item) => `${item.mimeType ?? 'image/png'}-${item.data}`)
+        );
+        const next = [...prev];
+
+        upcomingAttachments.forEach((attachment) => {
+          const signature = `${attachment.mimeType ?? 'image/png'}-${attachment.data}`;
+          if (!existingSignatures.has(signature)) {
+            existingSignatures.add(signature);
+            next.push(attachment);
+          } else if (attachment.previewUrl) {
+            URL.revokeObjectURL(attachment.previewUrl);
+          }
+        });
+
+        return next;
+      });
       setLocalError('');
     } catch (conversionError) {
-      setLocalError(conversionError?.message ?? 'Impossibile caricare l’immagine.');
+      setLocalError(conversionError?.message ?? 'Impossibile caricare le immagini selezionate.');
+    } finally {
+      setIsProcessingFiles(false);
+      if (event.target) {
+        event.target.value = '';
+      }
     }
   };
 
-  const handleRemoveImage = () => {
-    setImageBase64(null);
-    setImageName('');
-  };
+  const handleRemoveImage = useCallback((attachmentId) => {
+    setAttachments((prev) => {
+      const toRemove = prev.find((item) => item.id === attachmentId);
+      if (toRemove?.previewUrl) {
+        URL.revokeObjectURL(toRemove.previewUrl);
+      }
+      return prev.filter((item) => item.id !== attachmentId);
+    });
+  }, []);
 
   return (
     <section className="flex h-full flex-col rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -171,7 +279,19 @@ function Chat({
                   }`}
                 >
                   <p className="whitespace-pre-wrap">{message.content}</p>
-                  {message.imageBase64 ? (
+                  {Array.isArray(message.images) && message.images.length > 0 ? (
+                    <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(96px,1fr))] gap-3">
+                      {message.images.map((image, imageIndex) => (
+                        <img
+                          key={`${message.timestamp}-${imageIndex}`}
+                          src={`data:${image?.mimeType ?? 'image/png'};base64,${image?.data ?? ''}`}
+                          alt={image?.name ? `Allegato ${image.name}` : 'Allegato immagine'}
+                          className="max-h-48 w-full rounded-lg border border-slate-200 object-cover"
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                  {!message.images?.length && message.imageBase64 ? (
                     <img
                       src={`data:image/png;base64,${message.imageBase64}`}
                       alt="Allegato utente"
@@ -221,26 +341,47 @@ function Chat({
                   accept="image/*"
                   onChange={handleFileChange}
                   className="hidden"
-                  disabled={isGenerating}
+                  disabled={isGenerating || isProcessingFiles}
+                  multiple
                 />
                 📎 Allega immagine (PNG/JPEG)
               </label>
-              {imageBase64 ? (
-                <div className="flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-slate-600">
-                  <span className="truncate pr-3 text-xs font-medium">{imageName || 'Immagine allegata'}</span>
-                  <button
-                    type="button"
-                    onClick={handleRemoveImage}
-                    className="text-xs font-semibold text-emerald-600 hover:text-emerald-500"
-                  >
-                    Rimuovi
-                  </button>
+              {attachments.length > 0 ? (
+                <div className="flex flex-wrap gap-3">
+                  {attachments.map((attachment) => (
+                    <div
+                      key={attachment.id}
+                      className="relative overflow-hidden rounded-xl border border-emerald-200 bg-emerald-50 shadow-sm"
+                    >
+                      <img
+                        src={attachment.previewUrl}
+                        alt={attachment.name || 'Immagine allegata'}
+                        className="h-24 w-24 object-cover"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveImage(attachment.id)}
+                        className="absolute right-1 top-1 rounded-full bg-white/90 px-2 py-1 text-[10px] font-semibold text-emerald-600 shadow hover:bg-white"
+                        aria-label={`Rimuovi ${attachment.name}`}
+                      >
+                        Rimuovi
+                      </button>
+                      <p className="w-24 truncate px-2 pb-2 pt-1 text-[10px] font-medium text-emerald-700">
+                        {attachment.name || 'Immagine'}
+                      </p>
+                    </div>
+                  ))}
                 </div>
               ) : (
                 <p className="text-[11px] text-slate-400">
                   Imm. abilitate per questo modello — allega un file opzionale.
                 </p>
               )}
+              {isProcessingFiles ? (
+                <p className="text-[11px] font-semibold text-emerald-600">
+                  Caricamento immagini in corso…
+                </p>
+              ) : null}
             </div>
           ) : null}
 
@@ -254,10 +395,14 @@ function Chat({
             </p>
             <button
               type="submit"
-              disabled={isGenerating}
+              disabled={isGenerating || isProcessingFiles}
               className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-70"
             >
-              {isGenerating ? 'Generazione…' : 'Invia'}
+              {isGenerating
+                ? 'Generazione…'
+                : isProcessingFiles
+                ? 'Caricamento…'
+                : 'Invia'}
             </button>
           </div>
         </form>

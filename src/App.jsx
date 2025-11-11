@@ -26,6 +26,176 @@ import SettingsPanel from './components/SettingsPanel.jsx';
 import { auth, db } from './firebase.js';
 import { DEFAULT_MODEL, MODEL_OPTIONS, getModelMeta } from './constants/models.js';
 
+const normalizeImages = (rawImages) => {
+  if (!Array.isArray(rawImages)) {
+    return [];
+  }
+
+  return rawImages
+    .map((image) => {
+      const data = typeof image?.data === 'string' ? image.data.trim() : '';
+      if (!data) {
+        return null;
+      }
+
+      const mimeType =
+        typeof image?.mimeType === 'string' && image.mimeType.trim().length > 0
+          ? image.mimeType.trim()
+          : 'image/png';
+
+      const name = typeof image?.name === 'string' ? image.name : '';
+      const size =
+        typeof image?.size === 'number' && Number.isFinite(image.size) ? image.size : undefined;
+
+      return {
+        data,
+        mimeType,
+        name,
+        ...(size !== undefined ? { size } : {}),
+      };
+    })
+    .filter(Boolean);
+};
+
+const collectImages = (rawImages, rawParts) => {
+  const normalizedImages = normalizeImages(rawImages);
+
+  const imagesFromParts = Array.isArray(rawParts)
+    ? rawParts
+        .map((part) => {
+          if (!part || typeof part !== 'object' || part.type !== 'image') {
+            return null;
+          }
+          const data = typeof part.data === 'string' ? part.data.trim() : '';
+          if (!data) {
+            return null;
+          }
+          const mimeType =
+            typeof part.mimeType === 'string' && part.mimeType.trim().length > 0
+              ? part.mimeType.trim()
+              : 'image/png';
+          const name = typeof part.name === 'string' ? part.name : '';
+          const size =
+            typeof part.size === 'number' && Number.isFinite(part.size) ? part.size : undefined;
+
+          return {
+            data,
+            mimeType,
+            name,
+            ...(size !== undefined ? { size } : {}),
+          };
+        })
+        .filter(Boolean)
+    : [];
+
+  const combined = [...normalizedImages, ...imagesFromParts];
+  if (combined.length === 0) {
+    return [];
+  }
+
+  const unique = [];
+  const seen = new Set();
+
+  combined.forEach((image) => {
+    const data = typeof image?.data === 'string' ? image.data.trim() : '';
+    if (!data) {
+      return;
+    }
+    const mimeType =
+      typeof image?.mimeType === 'string' && image.mimeType.trim().length > 0
+        ? image.mimeType.trim()
+        : 'image/png';
+    const signature = `${mimeType}-${data}`;
+    if (seen.has(signature)) {
+      return;
+    }
+    seen.add(signature);
+
+    const name = typeof image?.name === 'string' ? image.name : '';
+    const size =
+      typeof image?.size === 'number' && Number.isFinite(image.size) ? image.size : undefined;
+
+    unique.push({
+      data,
+      mimeType,
+      name,
+      ...(size !== undefined ? { size } : {}),
+    });
+  });
+
+  return unique;
+};
+
+const buildGeminiParts = ({ content, sanitizedImages, rawParts }) => {
+  const parts = [];
+
+  if (Array.isArray(rawParts)) {
+    rawParts.forEach((part) => {
+      if (!part || typeof part !== 'object') {
+        return;
+      }
+
+      if (part.type === 'text') {
+        const text = typeof part.text === 'string' ? part.text.trim() : '';
+        if (text.length > 0) {
+          parts.push({ text });
+        }
+        return;
+      }
+
+      if (part.type === 'image') {
+        const data = typeof part.data === 'string' ? part.data.trim() : '';
+        if (!data) {
+          return;
+        }
+        const mimeTypeCandidate =
+          typeof part.mimeType === 'string' && part.mimeType.trim().length > 0
+            ? part.mimeType.trim()
+            : null;
+        const sanitizedMatch = sanitizedImages.find((image) => image.data === data);
+        const mimeType = mimeTypeCandidate || sanitizedMatch?.mimeType || 'image/png';
+
+        parts.push({
+          inline_data: {
+            mime_type: mimeType,
+            data,
+          },
+        });
+      }
+    });
+  }
+
+  const trimmedContent = typeof content === 'string' ? content.trim() : '';
+  const hasTextPart = parts.some((part) => typeof part.text === 'string' && part.text.length > 0);
+
+  if (trimmedContent && !hasTextPart) {
+    parts.unshift({ text: trimmedContent });
+  }
+
+  sanitizedImages.forEach((image) => {
+    const alreadyIncluded = parts.some(
+      (part) =>
+        part.inline_data &&
+        part.inline_data.data === image.data &&
+        part.inline_data.mime_type === (image.mimeType ?? 'image/png')
+    );
+    if (!alreadyIncluded) {
+      parts.push({
+        inline_data: {
+          mime_type: image.mimeType ?? 'image/png',
+          data: image.data,
+        },
+      });
+    }
+  });
+
+  if (parts.length === 0) {
+    parts.push({ text: 'Hello Gemini!' });
+  }
+
+  return parts;
+};
+
 const DEFAULT_SETTINGS = {
   model: DEFAULT_MODEL,
   temperature: 0.8,
@@ -220,6 +390,11 @@ function App() {
                 role: message?.role ?? 'user',
                 content: message?.content ?? '',
                 timestamp: message?.timestamp ?? Date.now(),
+                images: normalizeImages(message?.images),
+                imageBase64:
+                  typeof message?.imageBase64 === 'string' && message.imageBase64.trim().length > 0
+                    ? message.imageBase64.trim()
+                    : null,
               }))
             : [];
 
@@ -385,19 +560,35 @@ function App() {
   }, [error]);
 
   const handleSendMessage = useCallback(
-    async ({ text: rawContent, imageBase64 }) => {
+    async ({ text: rawContent = '', images: rawImages = [], parts: rawParts = [] }) => {
       if (!user) {
         throw new Error('Devi essere autenticato per inviare messaggi.');
       }
 
-      const content = rawContent.trim();
-      if (!content) return;
+      const contentFromProp = typeof rawContent === 'string' ? rawContent.trim() : '';
+      const firstTextPart =
+        Array.isArray(rawParts) && rawParts.length > 0
+          ? rawParts.find(
+              (part) => part?.type === 'text' && typeof part.text === 'string' && part.text.trim()
+            )
+          : null;
+      const derivedContent =
+        contentFromProp ||
+        (typeof firstTextPart?.text === 'string' ? firstTextPart.text.trim() : '');
+
+      const sanitizedImages = collectImages(rawImages, rawParts);
+
+      if (!derivedContent && sanitizedImages.length === 0) {
+        return;
+      }
 
       setError(null);
       setIsGenerating(true);
 
       try {
-        const chatId = await ensureChatExists(activeChatId, content);
+        const initialTitle =
+          derivedContent || (sanitizedImages.length > 0 ? 'Chat con immagini' : '');
+        const chatId = await ensureChatExists(activeChatId, initialTitle);
 
         if (!chatId) {
           throw new Error('Impossibile creare la chat.');
@@ -409,20 +600,29 @@ function App() {
         const existingChat =
           chats.find((chat) => chat.id === chatId) ?? {
             id: chatId,
-            title: content.slice(0, 40),
+            title: derivedContent.slice(0, 40),
             messages: [],
           };
 
         const title =
           existingChat.title && existingChat.title !== 'Nuova chat'
             ? existingChat.title
-            : content.slice(0, 60);
+            : derivedContent
+            ? derivedContent.slice(0, 60)
+            : 'Chat con immagini';
+
+        const userParts = buildGeminiParts({
+          content: derivedContent,
+          sanitizedImages,
+          rawParts,
+        });
 
         const userMessage = {
           role: 'user',
-          content,
+          content: derivedContent,
           timestamp: Date.now(),
-          imageBase64: imageBase64 ?? null,
+          images: sanitizedImages,
+          imageBase64: sanitizedImages[0]?.data ?? null,
         };
 
         const updatedMessages = [...(existingChat.messages ?? []), userMessage];
@@ -459,19 +659,37 @@ function App() {
           meta.supportsImages
         );
 
+        const instructionText =
+          typeof settings.instructions === 'string' ? settings.instructions.trim() : '';
+
+        const requestPayload = {
+          model: selectedModelMeta.value,
+          contents: [
+            {
+              role: 'user',
+              parts: userParts,
+            },
+          ],
+          userPrompt: derivedContent,
+          images: meta.supportsImages ? sanitizedImages : [],
+          temperature: settings.temperature,
+          top_p: settings.topP,
+          maxOutputTokens: 2048,
+        };
+
+        if (instructionText) {
+          requestPayload.systemInstruction = {
+            role: 'system',
+            parts: [{ text: instructionText }],
+          };
+        }
+
         const response = await fetch('/api/generate', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            model: selectedModelMeta.value,
-            userPrompt: content,
-            imageBase64: meta.supportsImages ? imageBase64 ?? null : null,
-            temperature: settings.temperature,
-            top_p: settings.topP,
-            maxOutputTokens: 2048,
-          }),
+          body: JSON.stringify(requestPayload),
         });
 
         if (!response.ok) {

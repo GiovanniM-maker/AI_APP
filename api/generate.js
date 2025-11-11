@@ -45,33 +45,240 @@ const parseBody = (body) => {
   return body;
 };
 
-const buildRequestBody = ({ userPrompt, imageBase64, temperature, topP, maxOutputTokens }) => {
-  const parts = [];
-
-  if (typeof userPrompt === 'string' && userPrompt.trim().length > 0) {
-    parts.push({ text: userPrompt.trim() });
+const sanitizeImageParts = (rawImages) => {
+  if (!Array.isArray(rawImages)) {
+    return [];
   }
 
-  if (typeof imageBase64 === 'string' && imageBase64.trim().length > 0) {
-    parts.push({
-      inline_data: {
-        mime_type: 'image/png',
-        data: imageBase64.trim(),
-      },
-    });
+  return rawImages
+    .map((image, index) => {
+      if (!image) {
+        return null;
+      }
+
+      const rawData = typeof image.data === 'string' ? image.data.trim() : '';
+      if (!rawData) {
+        return null;
+      }
+
+      const normalizedData = rawData.replace(/\s/g, '');
+      if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalizedData)) {
+        console.warn(`⚠️ Immagine inline #${index} non valida: caratteri base64 non conformi`);
+        return null;
+      }
+
+      try {
+        const decoded = Buffer.from(normalizedData, 'base64');
+        if (!decoded || decoded.length === 0) {
+          console.warn(`⚠️ Immagine inline #${index} ignorata: dati vuoti dopo decode`);
+          return null;
+        }
+      } catch (error) {
+        console.warn(`⚠️ Immagine inline #${index} non valida: ${error.message}`);
+        return null;
+      }
+
+      const mimeType =
+        typeof image.mimeType === 'string' && image.mimeType.trim().length > 0
+          ? image.mimeType.trim()
+          : 'image/png';
+
+      return {
+        mime_type: mimeType,
+        data: normalizedData,
+      };
+    })
+    .filter(Boolean);
+};
+
+const sanitizeParts = (rawParts) => {
+  if (!Array.isArray(rawParts)) {
+    return [];
   }
 
-  if (parts.length === 0) {
-    parts.push({ text: 'Hello Gemini!' });
+  const sanitizedParts = [];
+
+  rawParts.forEach((part) => {
+    if (!part || typeof part !== 'object') {
+      return;
+    }
+
+    if (typeof part.text === 'string') {
+      const text = part.text.trim();
+      if (text.length > 0) {
+        sanitizedParts.push({ text });
+      }
+      return;
+    }
+
+    const inlineCandidate = part.inline_data ?? part.inlineData;
+    if (inlineCandidate && typeof inlineCandidate === 'object') {
+      const sanitizedInline = sanitizeImageParts([
+        {
+          data:
+            typeof inlineCandidate.data === 'string'
+              ? inlineCandidate.data
+              : typeof inlineCandidate.base64 === 'string'
+              ? inlineCandidate.base64
+              : '',
+          mimeType:
+            typeof inlineCandidate.mime_type === 'string' && inlineCandidate.mime_type.trim().length > 0
+              ? inlineCandidate.mime_type.trim()
+              : typeof inlineCandidate.mimeType === 'string' && inlineCandidate.mimeType.trim().length > 0
+              ? inlineCandidate.mimeType.trim()
+              : undefined,
+        },
+      ])[0];
+
+      if (sanitizedInline) {
+        sanitizedParts.push({ inline_data: sanitizedInline });
+      }
+    }
+  });
+
+  return sanitizedParts;
+};
+
+const sanitizeContents = (rawContents) => {
+  if (!Array.isArray(rawContents)) {
+    return [];
+  }
+
+  const sanitized = [];
+
+  rawContents.forEach((content, index) => {
+    if (!content || typeof content !== 'object') {
+      return;
+    }
+
+    const role =
+      typeof content.role === 'string' && content.role.trim().length > 0
+        ? content.role.trim()
+        : index === 0
+        ? 'user'
+        : 'assistant';
+
+    const parts = sanitizeParts(content.parts);
+    if (parts.length > 0) {
+      sanitized.push({
+        role,
+        parts,
+      });
+    }
+  });
+
+  return sanitized;
+};
+
+const sanitizeSystemInstruction = (rawInstruction) => {
+  if (!rawInstruction) {
+    return null;
+  }
+
+  if (typeof rawInstruction === 'string') {
+    const text = rawInstruction.trim();
+    if (!text) {
+      return null;
+    }
+    return {
+      role: 'system',
+      parts: [{ text }],
+    };
+  }
+
+  if (typeof rawInstruction !== 'object') {
+    return null;
+  }
+
+  const role =
+    typeof rawInstruction.role === 'string' && rawInstruction.role.trim().length > 0
+      ? rawInstruction.role.trim()
+      : 'system';
+
+  const candidateParts =
+    Array.isArray(rawInstruction.parts) && rawInstruction.parts.length > 0
+      ? rawInstruction.parts
+      : [
+          {
+            text: typeof rawInstruction.text === 'string' ? rawInstruction.text : '',
+          },
+        ];
+
+  const sanitizedParts = sanitizeParts(candidateParts);
+  if (sanitizedParts.length === 0) {
+    return null;
   }
 
   return {
-    contents: [
+    role,
+    parts: sanitizedParts,
+  };
+};
+
+const buildRequestBody = ({
+  userPrompt,
+  images,
+  temperature,
+  topP,
+  maxOutputTokens,
+  contents,
+  systemInstruction,
+}) => {
+  const fallbackParts = [];
+
+  if (typeof userPrompt === 'string' && userPrompt.trim().length > 0) {
+    fallbackParts.push({ text: userPrompt.trim() });
+  }
+
+  const inlineImages = sanitizeImageParts(images);
+  if (inlineImages.length > 0) {
+    inlineImages.forEach((inlineImage) => {
+      fallbackParts.push({
+        inline_data: inlineImage,
+      });
+    });
+  }
+
+  let sanitizedContents = sanitizeContents(contents);
+
+  if (sanitizedContents.length === 0) {
+    if (fallbackParts.length === 0) {
+      fallbackParts.push({ text: 'Hello Gemini!' });
+    }
+    sanitizedContents = [
       {
         role: 'user',
-        parts,
+        parts: fallbackParts,
       },
-    ],
+    ];
+  } else if (inlineImages.length > 0) {
+    const firstUserMessage =
+      sanitizedContents.find((content) => content.role === 'user') ?? sanitizedContents[0];
+
+    if (firstUserMessage) {
+      const existingInline = new Set(
+        firstUserMessage.parts
+          .filter((part) => part.inline_data)
+          .map(
+            (part) =>
+              `${part.inline_data.mime_type ?? 'image/png'}-${part.inline_data.data ?? ''}`
+          )
+      );
+
+      inlineImages.forEach((inlineImage) => {
+        const signature = `${inlineImage.mime_type ?? 'image/png'}-${inlineImage.data ?? ''}`;
+        if (!existingInline.has(signature)) {
+          firstUserMessage.parts.push({
+            inline_data: inlineImage,
+          });
+          existingInline.add(signature);
+        }
+      });
+    }
+  }
+
+  const requestBody = {
+    contents: sanitizedContents,
     generationConfig: {
       temperature: typeof temperature === 'number' ? temperature : 0.7,
       topP: typeof topP === 'number' ? topP : 0.9,
@@ -81,6 +288,13 @@ const buildRequestBody = ({ userPrompt, imageBase64, temperature, topP, maxOutpu
           : 1024,
     },
   };
+
+  const sanitizedSystemInstruction = sanitizeSystemInstruction(systemInstruction);
+  if (sanitizedSystemInstruction) {
+    requestBody.systemInstruction = sanitizedSystemInstruction;
+  }
+
+  return requestBody;
 };
 
 let cachedServiceAccount = null;
@@ -207,8 +421,11 @@ const callGeminiRest = async ({ modelId, requestBody, accessToken }) => {
   }
 
   const text =
-    data?.candidates?.[0]?.content?.parts?.find((part) => typeof part?.text === 'string')?.text ??
-    'Nessuna risposta generata';
+    data?.candidates?.[0]?.content?.parts
+      ?.map((part) => (typeof part?.text === 'string' ? part.text : ''))
+      .filter((value) => typeof value === 'string' && value.trim().length > 0)
+      .join('\n')
+      ?.trim() ?? 'Nessuna risposta generata';
 
   return {
     ok: true,
@@ -233,8 +450,16 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { model, userPrompt, imageBase64, temperature, top_p: topP, maxOutputTokens } =
-      parseBody(req.body);
+    const {
+      model,
+      userPrompt,
+      images,
+      temperature,
+      top_p: topP,
+      maxOutputTokens,
+      contents,
+      systemInstruction,
+    } = parseBody(req.body);
 
     const accessToken = await getAccessToken();
 
@@ -243,10 +468,12 @@ export default async function handler(req, res) {
 
     const requestBody = buildRequestBody({
       userPrompt,
-      imageBase64,
+      images,
       temperature,
       topP,
       maxOutputTokens,
+      contents,
+      systemInstruction,
     });
 
     const result = await callGeminiRest({
