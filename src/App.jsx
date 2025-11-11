@@ -327,16 +327,14 @@ const uploadAttachmentsToStorage = async (attachments, userId, onStatusChange) =
 
         results.push(record);
         onStatusChange?.(attachmentId, 'success', { ...statusPayload, url });
+        console.log('[UPLOAD OK]', url);
         succeeded = true;
         lastError = null;
         break;
       } catch (error) {
         lastError = error;
         const classification = classifyStorageError(error);
-        console.error(
-          `[Storage] Upload fallito su ${trimmedBucket} [${classification}]`,
-          error
-        );
+        console.error(`[ERROR] Upload fallito su ${trimmedBucket} [${classification}]`, error);
 
         const isCors = classification === 'cors' || error?.code === 'storage/unauthorized';
 
@@ -446,6 +444,46 @@ const DEFAULT_STORAGE_CANDIDATES = Array.from(
     ...(Array.isArray(STORAGE_BUCKET_CANDIDATES) ? STORAGE_BUCKET_CANDIDATES : []),
   ])
 );
+
+const corsTestCache = new Map();
+const CORS_CACHE_TTL = 60_000;
+
+const testFirebaseCors = async (bucketHost) => {
+  const cacheKey = bucketHost || 'default';
+  const cached = corsTestCache.get(cacheKey);
+  const now = Date.now();
+
+  if (cached && now - cached.timestamp < CORS_CACHE_TTL) {
+    return cached.ok;
+  }
+
+  const endpoint = `https://firebasestorage.googleapis.com/v0/b/${bucketHost}/o`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'OPTIONS',
+      mode: 'cors',
+    });
+
+    const allowOrigin = response.headers.get('access-control-allow-origin');
+    const ok = response.ok && Boolean(allowOrigin);
+
+    if (ok) {
+      console.log(`[CORS TEST] Firebase Storage (${bucketHost}): attivo`);
+    } else {
+      console.warn(
+        `[CORS TEST] Firebase Storage (${bucketHost}): non attivo (status ${response.status})`
+      );
+    }
+
+    corsTestCache.set(cacheKey, { ok, timestamp: now });
+    return ok;
+  } catch (error) {
+    console.error(`[CORS TEST] Firebase Storage (${bucketHost}) fallito:`, error);
+    corsTestCache.set(cacheKey, { ok: false, timestamp: now });
+    return false;
+  }
+};
 
 const isLikelyCorsError = (error) => {
   if (!error) {
@@ -904,6 +942,26 @@ function App() {
       }
 
       if (attachmentsWithFile.length > 0) {
+        const corsOk = await testFirebaseCors(primaryStorageBucket);
+        if (!corsOk) {
+          const corsErrorMessage =
+            '⚠️ Il bucket Firebase non accetta upload da questo dominio. Verifica la configurazione CORS su Firebase Storage.';
+          console.warn(
+            `[CORS TEST] Firebase Storage (${primaryStorageBucket}) non attivo per questo dominio.`
+          );
+          setError(corsErrorMessage);
+          attachmentsWithFile.forEach((attachment, index) => {
+            const attachmentId =
+              typeof attachment?.id === 'string' && attachment.id.trim().length > 0
+                ? attachment.id
+                : `${index}`;
+            onUploadStatusChange?.(attachmentId, 'error', {
+              error: new Error(corsErrorMessage),
+            });
+          });
+          throw new Error(corsErrorMessage);
+        }
+
         uploadedImages = await uploadAttachmentsToStorage(
           attachmentsWithFile,
           user.uid,
@@ -1102,7 +1160,7 @@ function App() {
         console.error(`❌ Errore di rete o durante la generazione [${category}]:`, err);
 
         if (category === 'cors') {
-          setError('⚠️ Errore CORS su Firebase Storage. Verifica la configurazione CORS del bucket.');
+          setError('⚠️ Errore upload (probabile CORS non configurato su Firebase)');
         } else if (category === 'auth') {
           setError('⚠️ Permessi insufficienti su Firebase Storage. Controlla le regole e l’API key.');
         } else if (category === 'network') {

@@ -289,6 +289,11 @@ useEffect(() => {
           return null;
         }
 
+        const errorMessage =
+          typeof item?.errorMessage === 'string' && item.errorMessage.trim().length > 0
+            ? item.errorMessage.trim()
+            : null;
+
         const fileLike = base64ToFile(data, name, mimeType);
         let file = null;
         if (fileLike instanceof File) {
@@ -317,7 +322,7 @@ useEffect(() => {
           data,
           previewUrl,
           status: item?.status ?? 'ready',
-          lastError: null,
+          lastError: errorMessage,
           isRestored: true,
         };
       })
@@ -351,6 +356,9 @@ useEffect(() => {
       data: attachment.data,
       size: attachment.size,
       status: attachment.status ?? 'ready',
+      ...(typeof attachment?.lastError === 'string' && attachment.lastError.trim().length > 0
+        ? { errorMessage: attachment.lastError.trim() }
+        : {}),
     }));
 
   if (serializable.length > 0) {
@@ -367,11 +375,16 @@ const updateAttachmentStatus = useCallback((attachmentId, status, metadata = {})
         return attachment;
       }
 
+      const errorMessage =
+        typeof metadata?.error === 'string'
+          ? metadata.error
+          : metadata?.error?.message ?? null;
+
       return {
         ...attachment,
         status,
         ...(metadata?.url ? { uploadedUrl: metadata.url } : {}),
-        lastError: metadata?.error ?? null,
+        lastError: errorMessage,
       };
     })
   );
@@ -424,7 +437,7 @@ const updateAttachmentStatus = useCallback((attachmentId, status, metadata = {})
           prev.map((attachment) => ({
             ...attachment,
             status: 'uploading',
-            lastError: null,
+          lastError: null,
           }))
         );
         setIsUploading(true);
@@ -465,6 +478,7 @@ const updateAttachmentStatus = useCallback((attachmentId, status, metadata = {})
           prev.map((attachment) => ({
             ...attachment,
             status: 'success',
+            lastError: null,
           }))
         );
       }
@@ -480,7 +494,10 @@ const updateAttachmentStatus = useCallback((attachmentId, status, metadata = {})
           prev.map((attachment) => ({
             ...attachment,
             status: attachment.status === 'success' ? attachment.status : 'error',
-            lastError: err,
+            lastError:
+              typeof err?.message === 'string' && err.message.trim().length > 0
+                ? err.message
+                : 'Errore upload',
           }))
         );
       }
@@ -756,6 +773,11 @@ const updateAttachmentStatus = useCallback((attachmentId, status, metadata = {})
                       <p className="w-24 truncate px-2 pb-2 pt-1 text-[10px] font-medium text-emerald-700">
                         {attachment.name || 'Immagine'}
                       </p>
+                      {typeof attachment.lastError === 'string' && attachment.lastError.length > 0 ? (
+                        <p className="w-28 px-2 pb-2 text-[10px] font-medium text-rose-600">
+                          {attachment.lastError}
+                        </p>
+                      ) : null}
                     </div>
                   ))}
                 </div>
