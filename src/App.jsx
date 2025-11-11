@@ -24,7 +24,14 @@ import Login from './components/Login.jsx';
 import Chat from './components/Chat.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { auth, db, storage } from './firebase.js';
+import {
+  auth,
+  db,
+  storage,
+  getBucketStorage,
+  STORAGE_BUCKET_CANDIDATES,
+  storageBucket as primaryStorageBucket,
+} from './firebase.js';
 import { DEFAULT_MODEL, MODEL_OPTIONS, getModelMeta } from './constants/models.js';
 
 const normalizeImages = (rawImages) => {
@@ -259,43 +266,104 @@ const sanitizeExtension = (fileName) => {
   return normalized || 'bin';
 };
 
-const uploadAttachmentsToStorage = async (attachments, userId) => {
+const uploadAttachmentsToStorage = async (attachments, userId, onStatusChange) => {
   if (!Array.isArray(attachments) || attachments.length === 0) {
     return [];
   }
 
-  const uploads = await Promise.all(
-    attachments.map(async (attachment, index) => {
-      const file = attachment?.file;
-      const isFileAvailable = typeof File !== 'undefined';
-      if (!file || (isFileAvailable && !(file instanceof File))) {
-        return null;
+  const results = [];
+
+  for (let index = 0; index < attachments.length; index += 1) {
+    const attachment = attachments[index];
+    const file = attachment?.file;
+    const attachmentId =
+      typeof attachment?.id === 'string' && attachment.id.trim().length > 0
+        ? attachment.id
+        : `${index}`;
+    const isFileAvailable = typeof File !== 'undefined';
+
+    if (!file || (isFileAvailable && !(file instanceof File))) {
+      continue;
+    }
+
+    const mimeType =
+      typeof attachment?.mimeType === 'string' && attachment.mimeType.trim().length > 0
+        ? attachment.mimeType.trim()
+        : file.type || 'image/jpeg';
+
+    const extension = sanitizeExtension(file.name);
+    let succeeded = false;
+    let lastError = null;
+
+    for (const bucket of DEFAULT_STORAGE_CANDIDATES) {
+      const trimmedBucket = typeof bucket === 'string' ? bucket.trim() : '';
+      if (!trimmedBucket) {
+        // eslint-disable-next-line no-continue
+        continue;
       }
 
-      const mimeType =
-        typeof attachment?.mimeType === 'string' && attachment.mimeType.trim().length > 0
-          ? attachment.mimeType.trim()
-          : file.type || 'image/jpeg';
+      const statusPayload = { bucket: trimmedBucket };
 
-      const extension = sanitizeExtension(file.name);
-      const storagePath = `uploads/${userId}/${Date.now()}-${index}-${randomId()}.${extension}`;
-      const storageRef = ref(storage, storagePath);
+      try {
+        onStatusChange?.(attachmentId, 'uploading', statusPayload);
+        const storageInstance = trimmedBucket === primaryStorageBucket
+          ? storage
+          : getBucketStorage(trimmedBucket);
+        const storagePath = `uploads/${userId}/${Date.now()}-${index}-${randomId()}.${extension}`;
+        const storageRef = ref(storageInstance, storagePath);
 
-      await uploadBytes(storageRef, file, {
-        contentType: mimeType,
-      });
+        await uploadBytes(storageRef, file, {
+          contentType: mimeType,
+        });
 
-      const url = await getDownloadURL(storageRef);
-      return {
-        url,
-        mimeType,
-        name: attachment?.name ?? file.name ?? '',
-        size: typeof file.size === 'number' ? file.size : undefined,
-      };
-    })
-  );
+        const url = await getDownloadURL(storageRef);
+        const record = {
+          url,
+          mimeType,
+          name: attachment?.name ?? file.name ?? '',
+          size: typeof file.size === 'number' ? file.size : undefined,
+          bucket: trimmedBucket,
+        };
 
-  return uploads.filter(Boolean);
+        results.push(record);
+        onStatusChange?.(attachmentId, 'success', { ...statusPayload, url });
+        succeeded = true;
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        const classification = classifyStorageError(error);
+        console.error(
+          `[Storage] Upload fallito su ${trimmedBucket} [${classification}]`,
+          error
+        );
+
+        const isCors = classification === 'cors' || error?.code === 'storage/unauthorized';
+
+        if (isCors) {
+          onStatusChange?.(attachmentId, 'retrying', { ...statusPayload, error });
+          // eslint-disable-next-line no-continue
+          continue;
+        }
+
+        onStatusChange?.(attachmentId, 'error', { ...statusPayload, error });
+        throw error;
+      }
+    }
+
+    if (!succeeded) {
+      if (lastError) {
+        onStatusChange?.(attachmentId, 'error', { error: lastError });
+        throw lastError;
+      } else {
+        const genericError = new Error('Upload fallito su tutti i bucket disponibili.');
+        onStatusChange?.(attachmentId, 'error', { error: genericError });
+        throw genericError;
+      }
+    }
+  }
+
+  return results;
 };
 
 const mapImagesForUi = (images) =>
@@ -371,6 +439,14 @@ const DEFAULT_SETTINGS = {
   instructions: '',
 };
 
+const DEFAULT_STORAGE_CANDIDATES = Array.from(
+  new Set([
+    'auiki-x-eataly.firebasestorage.app',
+    'auiki-x-eataly.appspot.com',
+    ...(Array.isArray(STORAGE_BUCKET_CANDIDATES) ? STORAGE_BUCKET_CANDIDATES : []),
+  ])
+);
+
 const isLikelyCorsError = (error) => {
   if (!error) {
     return false;
@@ -400,6 +476,27 @@ const isLikelyCorsError = (error) => {
   ];
 
   return corsIndicators.some((indicator) => message.includes(indicator));
+};
+
+const classifyStorageError = (error) => {
+  if (!error) {
+    return 'unknown';
+  }
+  if (isLikelyCorsError(error)) {
+    return 'cors';
+  }
+  const code = typeof error?.code === 'string' ? error.code.toLowerCase() : '';
+  if (code.includes('unauthorized')) {
+    return 'auth';
+  }
+  if (
+    code.includes('retry-limit-exceeded') ||
+    code.includes('canceled') ||
+    code.includes('timeout')
+  ) {
+    return 'network';
+  }
+  return 'unknown';
 };
 
 function App() {
@@ -764,6 +861,7 @@ function App() {
       images: rawImages = [],
       attachments: rawAttachments = [],
       parts: rawParts = [],
+      onUploadStatusChange,
     }) => {
       if (!user) {
         throw new Error('Devi essere autenticato per inviare messaggi.');
@@ -806,7 +904,11 @@ function App() {
       }
 
       if (attachmentsWithFile.length > 0) {
-        uploadedImages = await uploadAttachmentsToStorage(attachmentsWithFile, user.uid);
+        uploadedImages = await uploadAttachmentsToStorage(
+          attachmentsWithFile,
+          user.uid,
+          onUploadStatusChange
+        );
       }
 
       const uiUploadedImages = mapImagesForUi(uploadedImages);
@@ -996,10 +1098,15 @@ function App() {
 
         resetStreaming();
       } catch (err) {
-        console.error('❌ Errore di rete o durante la generazione:', err);
+        const category = classifyStorageError(err);
+        console.error(`❌ Errore di rete o durante la generazione [${category}]:`, err);
 
-        if (isLikelyCorsError(err)) {
+        if (category === 'cors') {
           setError('⚠️ Errore CORS su Firebase Storage. Verifica la configurazione CORS del bucket.');
+        } else if (category === 'auth') {
+          setError('⚠️ Permessi insufficienti su Firebase Storage. Controlla le regole e l’API key.');
+        } else if (category === 'network') {
+          setError('⚠️ Errore di rete con Firebase Storage. Controlla la connessione e riprova.');
         } else {
           const fallbackMessage = 'Errore di connessione. Riprova tra poco.';
           const friendlyMessage =

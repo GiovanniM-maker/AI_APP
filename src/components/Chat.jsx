@@ -12,6 +12,36 @@ function formatTime(timestamp) {
 const MAX_IMAGE_INLINE_BYTES = 900_000;
 const MAX_IMAGE_DIMENSIONS = [1600, 1280, 1024, 720, 512];
 const JPEG_QUALITY_STEPS = [0.88, 0.75, 0.65, 0.5];
+const SESSION_STORAGE_KEY = 'chat.pendingAttachments';
+
+const base64ToFile = (base64, fileName, mimeType) => {
+  try {
+    if (typeof window === 'undefined' || typeof atob !== 'function') {
+      return null;
+    }
+    const binaryString = atob(base64);
+    const length = binaryString.length;
+    const bytes = new Uint8Array(length);
+    for (let i = 0; i < length; i += 1) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+
+    const safeName =
+      typeof fileName === 'string' && fileName.trim().length > 0
+        ? fileName.trim()
+        : `attachment-${Date.now()}.png`;
+    const type =
+      typeof mimeType === 'string' && mimeType.trim().length > 0 ? mimeType.trim() : 'image/png';
+
+    if (typeof File === 'function') {
+      return new File([bytes], safeName, { type });
+    }
+    return new Blob([bytes], { type });
+  } catch (error) {
+    console.warn('Impossibile ricostruire il file da base64', error);
+    return null;
+  }
+};
 
 const readFileAsBase64 = (file) =>
   new Promise((resolve, reject) => {
@@ -177,6 +207,7 @@ function Chat({
   const [localError, setLocalError] = useState('');
   const [attachments, setAttachments] = useState([]);
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   const messagesEndRef = useRef(null);
   const attachmentsRef = useRef([]);
 
@@ -209,22 +240,142 @@ function Chat({
     });
   }, []);
 
-  const clearAttachments = useCallback(() => {
-    setAttachments((prev) => {
-      prev.forEach((attachment) => {
-        if (attachment?.previewUrl) {
-          URL.revokeObjectURL(attachment.previewUrl);
-        }
-      });
-      return [];
+const clearAttachments = useCallback(() => {
+  setAttachments((prev) => {
+    prev.forEach((attachment) => {
+      if (attachment?.previewUrl) {
+        URL.revokeObjectURL(attachment.previewUrl);
+      }
     });
-  }, []);
+    return [];
+  });
+  setIsUploading(false);
+  if (typeof sessionStorage !== 'undefined') {
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+  }
+}, []);
 
   useEffect(() => {
     if (!supportsImages && attachments.length > 0) {
       clearAttachments();
     }
   }, [supportsImages, attachments.length, clearAttachments]);
+
+useEffect(() => {
+  if (typeof sessionStorage === 'undefined') {
+    return;
+  }
+
+  const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+  if (!raw) {
+    return;
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      return;
+    }
+
+    const restored = parsed
+      .map((item) => {
+        const mimeType =
+          typeof item?.mimeType === 'string' && item.mimeType.trim().length > 0
+            ? item.mimeType.trim()
+            : 'image/png';
+        const name = typeof item?.name === 'string' ? item.name : '';
+        const data = typeof item?.data === 'string' ? item.data : '';
+        if (!data) {
+          return null;
+        }
+
+        const fileLike = base64ToFile(data, name, mimeType);
+        let file = null;
+        if (fileLike instanceof File) {
+          file = fileLike;
+        } else if (fileLike instanceof Blob && typeof File === 'function') {
+          try {
+            file = new File([fileLike], name || `attachment-${Date.now()}`, { type: mimeType });
+          } catch (_) {
+            file = null;
+          }
+        }
+
+        const previewUrl =
+          file instanceof File ? URL.createObjectURL(file) : `data:${mimeType};base64,${data}`;
+
+        return {
+          id:
+            typeof item?.id === 'string' && item.id.trim().length > 0
+              ? item.id
+              : `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          file: file instanceof File ? file : null,
+          name,
+          mimeType,
+          size:
+            typeof item?.size === 'number' && Number.isFinite(item.size) ? item.size : undefined,
+          data,
+          previewUrl,
+          status: item?.status ?? 'ready',
+          lastError: null,
+          isRestored: true,
+        };
+      })
+      .filter(Boolean);
+
+    if (restored.length > 0) {
+      setAttachments(restored);
+    }
+  } catch (restoreError) {
+    console.warn('Impossibile ripristinare gli allegati dalla sessione.', restoreError);
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+  }
+}, []);
+
+useEffect(() => {
+  if (typeof sessionStorage === 'undefined') {
+    return;
+  }
+
+  if (attachments.length === 0) {
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    return;
+  }
+
+  const serializable = attachments
+    .filter((attachment) => typeof attachment?.data === 'string' && attachment.data.length > 0)
+    .map((attachment) => ({
+      id: attachment.id,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      data: attachment.data,
+      size: attachment.size,
+      status: attachment.status ?? 'ready',
+    }));
+
+  if (serializable.length > 0) {
+    sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(serializable));
+  } else {
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+  }
+}, [attachments]);
+
+const updateAttachmentStatus = useCallback((attachmentId, status, metadata = {}) => {
+  setAttachments((prev) =>
+    prev.map((attachment) => {
+      if (attachment.id !== attachmentId) {
+        return attachment;
+      }
+
+      return {
+        ...attachment,
+        status,
+        ...(metadata?.url ? { uploadedUrl: metadata.url } : {}),
+        lastError: metadata?.error ?? null,
+      };
+    })
+  );
+}, []);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -267,6 +418,26 @@ function Chat({
     }
 
     try {
+      let uploadStatusHandler = undefined;
+      if (hasImages) {
+        setAttachments((prev) =>
+          prev.map((attachment) => ({
+            ...attachment,
+            status: 'uploading',
+            lastError: null,
+          }))
+        );
+        setIsUploading(true);
+
+        uploadStatusHandler = (attachmentId, status, metadata) => {
+          if (status === 'retrying') {
+            updateAttachmentStatus(attachmentId, 'retry', metadata);
+          } else {
+            updateAttachmentStatus(attachmentId, status, metadata);
+          }
+        };
+      }
+
       await onSendMessage?.({
         text: trimmedText,
         images: attachments.map(({ data, mimeType, name, size }) => ({
@@ -287,13 +458,34 @@ function Chat({
           })
         ),
         parts: messageParts,
+        onUploadStatusChange: uploadStatusHandler,
       });
-      setInput('');
-      clearAttachments();
-      setLocalError('');
+      if (hasImages) {
+        setAttachments((prev) =>
+          prev.map((attachment) => ({
+            ...attachment,
+            status: 'success',
+          }))
+        );
+      }
+      setTimeout(() => {
+        setInput('');
+        clearAttachments();
+        setLocalError('');
+      }, hasImages ? 500 : 0);
     } catch (err) {
       setLocalError(err?.message ?? 'Invio messaggio fallito.');
+      if (hasImages) {
+        setAttachments((prev) =>
+          prev.map((attachment) => ({
+            ...attachment,
+            status: attachment.status === 'success' ? attachment.status : 'error',
+            lastError: err,
+          }))
+        );
+      }
     }
+    setIsUploading(false);
   };
 
   const handleFileChange = async (event) => {
@@ -540,6 +732,27 @@ function Chat({
                       >
                         Rimuovi
                       </button>
+                      <span
+                        className={`absolute left-1 top-1 rounded-full px-2 py-[3px] text-[10px] font-semibold ${
+                          attachment.status === 'success'
+                            ? 'bg-emerald-500/90 text-white'
+                            : attachment.status === 'uploading' || attachment.status === 'retry'
+                            ? 'bg-amber-500/90 text-white'
+                            : attachment.status === 'error'
+                            ? 'bg-rose-500/90 text-white'
+                            : 'bg-slate-500/70 text-white'
+                        }`}
+                      >
+                        {attachment.status === 'success'
+                          ? 'Upload completato'
+                          : attachment.status === 'uploading'
+                          ? 'Upload in corso…'
+                          : attachment.status === 'retry'
+                          ? 'Riprovo...'
+                          : attachment.status === 'error'
+                          ? 'Errore upload'
+                          : 'Pronto'}
+                      </span>
                       <p className="w-24 truncate px-2 pb-2 pt-1 text-[10px] font-medium text-emerald-700">
                         {attachment.name || 'Immagine'}
                       </p>
@@ -556,6 +769,11 @@ function Chat({
                   Caricamento immagini in corso…
                 </p>
               ) : null}
+              {isUploading ? (
+                <p className="text-[11px] font-semibold text-emerald-600">
+                  Upload verso Firebase Storage…
+                </p>
+              ) : null}
             </div>
           ) : null}
 
@@ -569,11 +787,13 @@ function Chat({
             </p>
             <button
               type="submit"
-              disabled={isGenerating || isProcessingFiles}
+              disabled={isGenerating || isProcessingFiles || isUploading}
               className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-70"
             >
               {isGenerating
                 ? 'Generazione…'
+                : isUploading
+                ? 'Upload in corso…'
                 : isProcessingFiles
                 ? 'Caricamento…'
                 : 'Invia'}
