@@ -294,6 +294,7 @@ const uploadAttachmentsToStorage = async (attachments, userId, onStatusChange) =
     const extension = sanitizeExtension(file.name);
     let succeeded = false;
     let lastError = null;
+    let lastClassification = 'unknown';
 
     for (const bucket of DEFAULT_STORAGE_CANDIDATES) {
       const trimmedBucket = typeof bucket === 'string' ? bucket.trim() : '';
@@ -305,45 +306,92 @@ const uploadAttachmentsToStorage = async (attachments, userId, onStatusChange) =
       const statusPayload = { bucket: trimmedBucket };
 
       try {
-        onStatusChange?.(attachmentId, 'uploading', statusPayload);
-        const storageInstance = trimmedBucket === primaryStorageBucket
-          ? storage
-          : getBucketStorage(trimmedBucket);
-        const storagePath = `uploads/${userId}/${Date.now()}-${index}-${randomId()}.${extension}`;
-        const storageRef = ref(storageInstance, storagePath);
+        let attempt = 0;
+        const MAX_UPLOAD_RETRIES = 3;
 
-        await uploadBytes(storageRef, file, {
-          contentType: mimeType,
-        });
+        while (attempt < MAX_UPLOAD_RETRIES) {
+          attempt += 1;
+          if (attempt === 1) {
+            onStatusChange?.(attachmentId, 'uploading', { ...statusPayload, attempt });
+          }
 
-        const url = await getDownloadURL(storageRef);
-        const record = {
-          url,
-          mimeType,
-          name: attachment?.name ?? file.name ?? '',
-          size: typeof file.size === 'number' ? file.size : undefined,
-          bucket: trimmedBucket,
-        };
+          try {
+            const storageInstance =
+              trimmedBucket === primaryStorageBucket ? storage : getBucketStorage(trimmedBucket);
+            const storagePath = `uploads/${userId}/${Date.now()}-${index}-${randomId()}.${extension}`;
+            const storageRef = ref(storageInstance, storagePath);
 
-        results.push(record);
-        onStatusChange?.(attachmentId, 'success', { ...statusPayload, url });
-        console.log('[UPLOAD OK]', url);
-        succeeded = true;
-        lastError = null;
-        break;
-      } catch (error) {
-        lastError = error;
-        const classification = classifyStorageError(error);
-        console.error(`[ERROR] Upload fallito su ${trimmedBucket} [${classification}]`, error);
+            await uploadBytes(storageRef, file, {
+              contentType: mimeType,
+            });
 
-        const isCors = classification === 'cors' || error?.code === 'storage/unauthorized';
+            const url = await getDownloadURL(storageRef);
+            const record = {
+              url,
+              mimeType,
+              name: attachment?.name ?? file.name ?? '',
+              size: typeof file.size === 'number' ? file.size : undefined,
+              bucket: trimmedBucket,
+            };
 
-        if (isCors) {
-          onStatusChange?.(attachmentId, 'retrying', { ...statusPayload, error });
-          // eslint-disable-next-line no-continue
-          continue;
+            results.push(record);
+            onStatusChange?.(attachmentId, 'success', { ...statusPayload, url });
+            console.log('[UPLOAD OK]', url);
+            succeeded = true;
+            lastError = null;
+            lastClassification = 'success';
+            break;
+          } catch (error) {
+            lastError = error;
+            lastClassification = classifyStorageError(error);
+            const isFetchError =
+              error instanceof TypeError ||
+              (typeof error?.message === 'string' && error.message.includes('Failed to fetch'));
+            const isCors =
+              lastClassification === 'cors' || error?.code === 'storage/unauthorized';
+            const isRetryable = isCors || lastClassification === 'network' || isFetchError;
+
+            console.error(
+              `[ERROR] Upload fallito su ${trimmedBucket} [${lastClassification}]`,
+              error
+            );
+
+            if (isRetryable && attempt < MAX_UPLOAD_RETRIES) {
+              console.warn(
+                `[UPLOAD RETRY] Tentativo ${attempt + 1} dopo errore ${lastClassification} su ${trimmedBucket}`
+              );
+              onStatusChange?.(attachmentId, 'retrying', {
+                ...statusPayload,
+                attempt: attempt + 1,
+                error,
+              });
+              await wait(3000);
+              continue;
+            }
+
+            if (isCors) {
+              console.warn(
+                `[UPLOAD RETRY] Passo al prossimo bucket dopo errore CORS su ${trimmedBucket}`
+              );
+              onStatusChange?.(attachmentId, 'retrying', {
+                ...statusPayload,
+                attempt: attempt + 1,
+                error,
+              });
+              break;
+            }
+
+            onStatusChange?.(attachmentId, 'error', { ...statusPayload, error });
+            throw error;
+          }
         }
 
+        if (succeeded) {
+          break;
+        }
+      } catch (error) {
+        lastError = error;
+        lastClassification = classifyStorageError(error);
         onStatusChange?.(attachmentId, 'error', { ...statusPayload, error });
         throw error;
       }
@@ -448,6 +496,10 @@ const DEFAULT_STORAGE_CANDIDATES = Array.from(
 const corsTestCache = new Map();
 const CORS_CACHE_TTL = 60_000;
 
+const wait = (ms) => new Promise((resolve) => {
+  setTimeout(resolve, ms);
+});
+
 const testFirebaseCors = async (bucketHost) => {
   const cacheKey = bucketHost || 'default';
   const cached = corsTestCache.get(cacheKey);
@@ -469,17 +521,18 @@ const testFirebaseCors = async (bucketHost) => {
     const ok = response.ok && Boolean(allowOrigin);
 
     if (ok) {
-      console.log(`[CORS TEST] Firebase Storage (${bucketHost}): attivo`);
+      console.log(`[CORS TEST] Firebase Storage attivo ✅ (${bucketHost})`);
     } else {
-      console.warn(
-        `[CORS TEST] Firebase Storage (${bucketHost}): non attivo (status ${response.status})`
-      );
+      console.warn(`[CORS TEST] Firebase Storage non attivo ❌ (${bucketHost})`, {
+        status: response.status,
+        allowOrigin,
+      });
     }
 
     corsTestCache.set(cacheKey, { ok, timestamp: now });
     return ok;
   } catch (error) {
-    console.error(`[CORS TEST] Firebase Storage (${bucketHost}) fallito:`, error);
+    console.error(`[CORS TEST] Firebase Storage (${bucketHost}) fallito ❌`, error);
     corsTestCache.set(cacheKey, { ok: false, timestamp: now });
     return false;
   }

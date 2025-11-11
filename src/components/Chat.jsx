@@ -323,6 +323,8 @@ useEffect(() => {
           previewUrl,
           status: item?.status ?? 'ready',
           lastError: errorMessage,
+          retryAttempt:
+            typeof item?.retryAttempt === 'number' && item.retryAttempt > 0 ? item.retryAttempt : 0,
           isRestored: true,
         };
       })
@@ -359,6 +361,9 @@ useEffect(() => {
       ...(typeof attachment?.lastError === 'string' && attachment.lastError.trim().length > 0
         ? { errorMessage: attachment.lastError.trim() }
         : {}),
+      ...(typeof attachment?.retryAttempt === 'number' && attachment.retryAttempt > 0
+        ? { retryAttempt: attachment.retryAttempt }
+        : {}),
     }));
 
   if (serializable.length > 0) {
@@ -385,6 +390,10 @@ const updateAttachmentStatus = useCallback((attachmentId, status, metadata = {})
         status,
         ...(metadata?.url ? { uploadedUrl: metadata.url } : {}),
         lastError: errorMessage,
+        retryAttempt:
+          typeof metadata?.attempt === 'number' && metadata.attempt > 0
+            ? metadata.attempt
+            : attachment.retryAttempt ?? 0,
       };
     })
   );
@@ -438,6 +447,7 @@ const updateAttachmentStatus = useCallback((attachmentId, status, metadata = {})
             ...attachment,
             status: 'uploading',
           lastError: null,
+            retryAttempt: 0,
           }))
         );
         setIsUploading(true);
@@ -479,6 +489,7 @@ const updateAttachmentStatus = useCallback((attachmentId, status, metadata = {})
             ...attachment,
             status: 'success',
             lastError: null,
+            retryAttempt: 0,
           }))
         );
       }
@@ -498,6 +509,7 @@ const updateAttachmentStatus = useCallback((attachmentId, status, metadata = {})
               typeof err?.message === 'string' && err.message.trim().length > 0
                 ? err.message
                 : 'Errore upload',
+            retryAttempt: attachment.retryAttempt ?? 0,
           }))
         );
       }
@@ -534,6 +546,9 @@ const updateAttachmentStatus = useCallback((attachmentId, status, metadata = {})
             size: file.size,
             data: processed.data,
             previewUrl: URL.createObjectURL(file),
+            status: 'ready',
+            lastError: null,
+            retryAttempt: 0,
           };
         })
       );
@@ -761,13 +776,13 @@ const updateAttachmentStatus = useCallback((attachmentId, status, metadata = {})
                         }`}
                       >
                         {attachment.status === 'success'
-                          ? 'Upload completato'
+                          ? 'Upload completato ✅'
                           : attachment.status === 'uploading'
                           ? 'Upload in corso…'
                           : attachment.status === 'retry'
-                          ? 'Riprovo...'
+                          ? `Riprovo… (tentativo ${attachment.retryAttempt ?? 0})`
                           : attachment.status === 'error'
-                          ? 'Errore upload'
+                          ? 'Errore upload ⚠️'
                           : 'Pronto'}
                       </span>
                       <p className="w-24 truncate px-2 pb-2 pt-1 text-[10px] font-medium text-emerald-700">
