@@ -275,6 +275,17 @@ function Chat({
           name,
           size,
         })),
+        attachments: attachments.map(
+          ({ id, file, name, mimeType, size, data, previewUrl }) => ({
+            id,
+            file,
+            name,
+            mimeType,
+            size,
+            data,
+            previewUrl,
+          })
+        ),
         parts: messageParts,
       });
       setInput('');
@@ -308,6 +319,7 @@ function Chat({
           const processed = await processImageFile(file);
           return {
             id: `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`,
+            file,
             name: file.name,
             mimeType: processed.mimeType || file.type || 'image/png',
             size: file.size,
@@ -420,22 +432,45 @@ function Chat({
                   <p className="whitespace-pre-wrap">{message.content}</p>
                   {Array.isArray(message.images) && message.images.length > 0 ? (
                     <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(96px,1fr))] gap-3">
-                      {message.images.map((image, imageIndex) => (
-                        <img
-                          key={`${message.timestamp}-${imageIndex}`}
-                          src={`data:${image?.mimeType ?? 'image/png'};base64,${image?.data ?? ''}`}
-                          alt={image?.name ? `Allegato ${image.name}` : 'Allegato immagine'}
-                          className="max-h-48 w-full rounded-lg border border-slate-200 object-cover"
-                        />
-                      ))}
+                      {message.images.map((image, imageIndex) => {
+                        const mimeType =
+                          image?.mimeType ||
+                          image?.mime_type ||
+                          (typeof image?.url === 'string' && image.url.includes('image/')
+                            ? image.url.split('?')[0]?.split('.').pop()
+                            : undefined) ||
+                          'image/png';
+                        let src = null;
+                        if (typeof image?.url === 'string' && image.url.length > 0) {
+                          src = image.url;
+                        } else if (
+                          typeof image?.previewUrl === 'string' &&
+                          image.previewUrl.length > 0
+                        ) {
+                          src = image.previewUrl;
+                        } else if (typeof image?.data === 'string' && image.data.length > 0) {
+                          src = `data:${mimeType};base64,${image.data}`;
+                        }
+
+                        if (!src) {
+                          return null;
+                        }
+
+                        const altLabel =
+                          image?.name ??
+                          image?.fileName ??
+                          (image?.isPreview ? 'Immagine in caricamento' : 'Allegato immagine');
+
+                        return (
+                          <img
+                            key={`${message.timestamp}-${imageIndex}`}
+                            src={src}
+                            alt={altLabel}
+                            className="max-h-48 w-full rounded-lg border border-slate-200 object-cover"
+                          />
+                        );
+                      })}
                     </div>
-                  ) : null}
-                  {!message.images?.length && message.imageBase64 ? (
-                    <img
-                      src={`data:image/png;base64,${message.imageBase64}`}
-                      alt="Allegato utente"
-                      className="mt-3 max-h-48 w-auto rounded-lg border border-slate-200"
-                    />
                   ) : null}
                   <span className="mt-2 block text-xs font-medium text-slate-400">
                     {formatTime(message.timestamp)}

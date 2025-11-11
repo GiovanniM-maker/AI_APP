@@ -23,7 +23,8 @@ import { getApps } from 'firebase/app';
 import Login from './components/Login.jsx';
 import Chat from './components/Chat.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
-import { auth, db } from './firebase.js';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { auth, db, storage } from './firebase.js';
 import { DEFAULT_MODEL, MODEL_OPTIONS, getModelMeta } from './constants/models.js';
 
 const normalizeImages = (rawImages) => {
@@ -33,22 +34,55 @@ const normalizeImages = (rawImages) => {
 
   return rawImages
     .map((image) => {
-      const data = typeof image?.data === 'string' ? image.data.trim() : '';
-      if (!data) {
+      if (!image || typeof image !== 'object') {
         return null;
       }
 
       const mimeType =
         typeof image?.mimeType === 'string' && image.mimeType.trim().length > 0
           ? image.mimeType.trim()
+          : typeof image?.mime_type === 'string' && image.mime_type.trim().length > 0
+          ? image.mime_type.trim()
           : 'image/png';
 
       const name = typeof image?.name === 'string' ? image.name : '';
+
+      const url = typeof image?.url === 'string' ? image.url.trim() : '';
+      if (url) {
+        return {
+          url,
+          mimeType,
+          name,
+        };
+      }
+
       const size =
         typeof image?.size === 'number' && Number.isFinite(image.size) ? image.size : undefined;
 
+      const data = typeof image?.data === 'string' ? image.data.trim() : '';
+      if (data) {
+        return {
+          data,
+          mimeType,
+          name,
+          ...(size !== undefined ? { size } : {}),
+        };
+      }
+
+      const previewUrl =
+        typeof image?.previewUrl === 'string' && image.previewUrl.trim().length > 0
+          ? image.previewUrl.trim()
+          : '';
+      if (previewUrl) {
+        return {
+          previewUrl,
+          mimeType,
+          name,
+          ...(size !== undefined ? { size } : {}),
+        };
+      }
+
       return {
-        data,
         mimeType,
         name,
         ...(size !== undefined ? { size } : {}),
@@ -68,7 +102,9 @@ const estimateBase64Bytes = (base64) => {
 const MAX_FIRESTORE_INLINE_BYTES = 900_000;
 
 const collectImages = (rawImages, rawParts) => {
-  const normalizedImages = normalizeImages(rawImages);
+  const normalizedImages = normalizeImages(rawImages).filter(
+    (image) => typeof image?.data === 'string' && image.data.trim().length > 0
+  );
 
   const imagesFromParts = Array.isArray(rawParts)
     ? rawParts
@@ -205,6 +241,128 @@ const buildGeminiParts = ({ content, sanitizedImages, rawParts }) => {
 
   return parts;
 };
+
+const randomId = () =>
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2, 10);
+
+const sanitizeExtension = (fileName) => {
+  if (typeof fileName !== 'string' || fileName.trim().length === 0) {
+    return 'bin';
+  }
+  const rawExt = fileName.split('.').pop();
+  if (!rawExt) {
+    return 'bin';
+  }
+  const normalized = rawExt.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  return normalized || 'bin';
+};
+
+const uploadAttachmentsToStorage = async (attachments, userId) => {
+  if (!Array.isArray(attachments) || attachments.length === 0) {
+    return [];
+  }
+
+  const uploads = await Promise.all(
+    attachments.map(async (attachment, index) => {
+      const file = attachment?.file;
+      const isFileAvailable = typeof File !== 'undefined';
+      if (!file || (isFileAvailable && !(file instanceof File))) {
+        return null;
+      }
+
+      const mimeType =
+        typeof attachment?.mimeType === 'string' && attachment.mimeType.trim().length > 0
+          ? attachment.mimeType.trim()
+          : file.type || 'image/jpeg';
+
+      const extension = sanitizeExtension(file.name);
+      const storagePath = `uploads/${userId}/${Date.now()}-${index}-${randomId()}.${extension}`;
+      const storageRef = ref(storage, storagePath);
+
+      await uploadBytes(storageRef, file, {
+        contentType: mimeType,
+      });
+
+      const url = await getDownloadURL(storageRef);
+      return {
+        url,
+        mimeType,
+        name: attachment?.name ?? file.name ?? '',
+        size: typeof file.size === 'number' ? file.size : undefined,
+      };
+    })
+  );
+
+  return uploads.filter(Boolean);
+};
+
+const mapImagesForUi = (images) =>
+  (Array.isArray(images) ? images : [])
+    .map((image) => {
+      const url = typeof image?.url === 'string' ? image.url.trim() : '';
+      if (!url) {
+        return null;
+      }
+
+      const mimeType =
+        typeof image?.mimeType === 'string' && image.mimeType.trim().length > 0
+          ? image.mimeType.trim()
+          : 'image/png';
+
+      const uiImage = {
+        url,
+        mimeType,
+        name: image?.name ?? '',
+      };
+
+      if (typeof image?.size === 'number' && Number.isFinite(image.size)) {
+        uiImage.size = image.size;
+      }
+
+      return uiImage;
+    })
+    .filter(Boolean);
+
+const mapImagesForStorage = (images) =>
+  (Array.isArray(images) ? images : [])
+    .map((image) => {
+      const url = typeof image?.url === 'string' ? image.url.trim() : '';
+      if (!url) {
+        return null;
+      }
+
+      const mimeType =
+        typeof image?.mimeType === 'string' && image.mimeType.trim().length > 0
+          ? image.mimeType.trim()
+          : typeof image?.mime_type === 'string' && image.mime_type.trim().length > 0
+          ? image.mime_type.trim()
+          : '';
+
+      const payload = {
+        url,
+        ...(mimeType ? { mime_type: mimeType } : {}),
+      };
+
+      if (typeof image?.name === 'string' && image.name.trim().length > 0) {
+        payload.name = image.name.trim();
+      }
+
+      if (typeof image?.size === 'number' && Number.isFinite(image.size)) {
+        payload.size = image.size;
+      }
+
+      return payload;
+    })
+    .filter(Boolean);
+
+const serializeMessagesForStorage = (messages) =>
+  (Array.isArray(messages) ? messages : []).map((message) => ({
+    ...message,
+    images: mapImagesForStorage(message?.images),
+    imageBase64: null,
+  }));
 
 const DEFAULT_SETTINGS = {
   model: DEFAULT_MODEL,
@@ -570,7 +728,12 @@ function App() {
   }, [error]);
 
   const handleSendMessage = useCallback(
-    async ({ text: rawContent = '', images: rawImages = [], parts: rawParts = [] }) => {
+    async ({
+      text: rawContent = '',
+      images: rawImages = [],
+      attachments: rawAttachments = [],
+      parts: rawParts = [],
+    }) => {
       if (!user) {
         throw new Error('Devi essere autenticato per inviare messaggi.');
       }
@@ -588,6 +751,18 @@ function App() {
 
       const sanitizedImages = collectImages(rawImages, rawParts);
 
+      const attachmentsWithFile = Array.isArray(rawAttachments)
+        ? rawAttachments.filter((attachment) => {
+            if (!attachment) return false;
+            if (typeof File === 'undefined') {
+              return Boolean(attachment.file);
+            }
+            return attachment.file instanceof File;
+          })
+        : [];
+
+      let uploadedImages = [];
+
       const inlineBytes = sanitizedImages.reduce(
         (sum, image) => sum + estimateBase64Bytes(image?.data ?? ''),
         0
@@ -598,6 +773,12 @@ function App() {
           'Le immagini selezionate sono troppo grandi per essere salvate nella chat. Riduci la risoluzione o il numero di immagini e riprova.'
         );
       }
+
+      if (attachmentsWithFile.length > 0) {
+        uploadedImages = await uploadAttachmentsToStorage(attachmentsWithFile, user.uid);
+      }
+
+      const uiUploadedImages = mapImagesForUi(uploadedImages);
 
       if (!derivedContent && sanitizedImages.length === 0) {
         return;
@@ -642,8 +823,8 @@ function App() {
           role: 'user',
           content: derivedContent,
           timestamp: Date.now(),
-          images: sanitizedImages,
-          imageBase64: sanitizedImages[0]?.data ?? null,
+          images: uiUploadedImages,
+          imageBase64: null,
         };
 
         const updatedMessages = [...(existingChat.messages ?? []), userMessage];
@@ -666,7 +847,7 @@ function App() {
           {
             userId: user.uid,
             title: title || 'Nuova chat',
-            messages: updatedMessages,
+            messages: serializeMessagesForStorage(updatedMessages),
             updatedAt: serverTimestamp(),
           },
           { merge: true }
@@ -776,7 +957,7 @@ function App() {
         await setDoc(
           chatRef,
           {
-            messages: finalMessages,
+            messages: serializeMessagesForStorage(finalMessages),
             updatedAt: serverTimestamp(),
           },
           { merge: true }
