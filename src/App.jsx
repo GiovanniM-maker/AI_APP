@@ -24,14 +24,7 @@ import Login from './components/Login.jsx';
 import Chat from './components/Chat.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import {
-  auth,
-  db,
-  storage,
-  getBucketStorage,
-  STORAGE_BUCKET_CANDIDATES,
-  storageBucket as primaryStorageBucket,
-} from './firebase.js';
+import { auth, db, storage } from './firebase.js';
 import { DEFAULT_MODEL, MODEL_OPTIONS, getModelMeta } from './constants/models.js';
 
 const normalizeImages = (rawImages) => {
@@ -272,6 +265,7 @@ const uploadAttachmentsToStorage = async (attachments, userId, onStatusChange) =
   }
 
   const results = [];
+  const MAX_UPLOAD_RETRIES = 3;
 
   for (let index = 0; index < attachments.length; index += 1) {
     const attachment = attachments[index];
@@ -294,118 +288,49 @@ const uploadAttachmentsToStorage = async (attachments, userId, onStatusChange) =
     const extension = sanitizeExtension(file.name);
     let succeeded = false;
     let lastError = null;
-    let lastClassification = 'unknown';
 
-    for (const bucket of DEFAULT_STORAGE_CANDIDATES) {
-      const trimmedBucket = typeof bucket === 'string' ? bucket.trim() : '';
-      if (!trimmedBucket) {
-        // eslint-disable-next-line no-continue
-        continue;
-      }
-
-      const statusPayload = { bucket: trimmedBucket };
-
+    for (let attempt = 0; attempt < MAX_UPLOAD_RETRIES; attempt += 1) {
       try {
-        let attempt = 0;
-        const MAX_UPLOAD_RETRIES = 3;
-
-        while (attempt < MAX_UPLOAD_RETRIES) {
-          attempt += 1;
-          if (attempt === 1) {
-            onStatusChange?.(attachmentId, 'uploading', { ...statusPayload, attempt });
-          }
-
-          try {
-            const storageInstance =
-              trimmedBucket === primaryStorageBucket ? storage : getBucketStorage(trimmedBucket);
-            const storagePath = `uploads/${userId}/${Date.now()}-${index}-${randomId()}.${extension}`;
-            const storageRef = ref(storageInstance, storagePath);
-
-            await uploadBytes(storageRef, file, {
-              contentType: mimeType,
-            });
-
-            const url = await getDownloadURL(storageRef);
-            const record = {
-              url,
-              mimeType,
-              name: attachment?.name ?? file.name ?? '',
-              size: typeof file.size === 'number' ? file.size : undefined,
-              bucket: trimmedBucket,
-            };
-
-            results.push(record);
-            onStatusChange?.(attachmentId, 'success', { ...statusPayload, url });
-            console.log('[UPLOAD OK]', url);
-            succeeded = true;
-            lastError = null;
-            lastClassification = 'success';
-            break;
-          } catch (error) {
-            lastError = error;
-            lastClassification = classifyStorageError(error);
-            const isFetchError =
-              error instanceof TypeError ||
-              (typeof error?.message === 'string' && error.message.includes('Failed to fetch'));
-            const isCors =
-              lastClassification === 'cors' || error?.code === 'storage/unauthorized';
-            const isRetryable = isCors || lastClassification === 'network' || isFetchError;
-
-            console.error(
-              `[ERROR] Upload fallito su ${trimmedBucket} [${lastClassification}]`,
-              error
-            );
-
-            if (isRetryable && attempt < MAX_UPLOAD_RETRIES) {
-              console.warn(
-                `[UPLOAD RETRY] Tentativo ${attempt + 1} dopo errore ${lastClassification} su ${trimmedBucket}`
-              );
-              onStatusChange?.(attachmentId, 'retrying', {
-                ...statusPayload,
-                attempt: attempt + 1,
-                error,
-              });
-              await wait(3000);
-              continue;
-            }
-
-            if (isCors) {
-              console.warn(
-                `[UPLOAD RETRY] Passo al prossimo bucket dopo errore CORS su ${trimmedBucket}`
-              );
-              onStatusChange?.(attachmentId, 'retrying', {
-                ...statusPayload,
-                attempt: attempt + 1,
-                error,
-              });
-              break;
-            }
-
-            onStatusChange?.(attachmentId, 'error', { ...statusPayload, error });
-            throw error;
-          }
+        if (attempt === 0) {
+          onStatusChange?.(attachmentId, 'uploading', { attempt: attempt + 1 });
+        } else {
+          console.warn(`[UPLOAD RETRY] Tentativo ${attempt + 1} dopo errore`, lastError);
+          onStatusChange?.(attachmentId, 'retrying', { attempt: attempt + 1, error: lastError });
+          await wait(3000);
         }
 
-        if (succeeded) {
-          break;
-        }
+        const storagePath = `uploads/${userId}/${Date.now()}-${index}-${randomId()}.${extension}`;
+        const storageRef = ref(storage, storagePath);
+
+        await uploadBytes(storageRef, file, {
+          contentType: mimeType,
+        });
+
+        const url = await getDownloadURL(storageRef);
+        const record = {
+          url,
+          mimeType,
+          name: attachment?.name ?? file.name ?? '',
+        };
+
+        results.push(record);
+        onStatusChange?.(attachmentId, 'success', { url });
+        console.log('[UPLOAD OK]', url);
+        succeeded = true;
+        break;
       } catch (error) {
         lastError = error;
-        lastClassification = classifyStorageError(error);
-        onStatusChange?.(attachmentId, 'error', { ...statusPayload, error });
-        throw error;
+        console.error(`[ERROR] Upload fallito [tentativo ${attempt + 1}/${MAX_UPLOAD_RETRIES}]`, error);
+
+        if (attempt === MAX_UPLOAD_RETRIES - 1) {
+          onStatusChange?.(attachmentId, 'error', { error });
+          throw new Error(`Upload fallito dopo ${MAX_UPLOAD_RETRIES} tentativi: ${error?.message || 'Errore sconosciuto'}`);
+        }
       }
     }
 
     if (!succeeded) {
-      if (lastError) {
-        onStatusChange?.(attachmentId, 'error', { error: lastError });
-        throw lastError;
-      } else {
-        const genericError = new Error('Upload fallito su tutti i bucket disponibili.');
-        onStatusChange?.(attachmentId, 'error', { error: genericError });
-        throw genericError;
-      }
+      throw lastError || new Error('Upload fallito');
     }
   }
 
@@ -425,17 +350,11 @@ const mapImagesForUi = (images) =>
           ? image.mimeType.trim()
           : 'image/png';
 
-      const uiImage = {
+      return {
         url,
         mimeType,
         name: image?.name ?? '',
       };
-
-      if (typeof image?.size === 'number' && Number.isFinite(image.size)) {
-        uiImage.size = image.size;
-      }
-
-      return uiImage;
     })
     .filter(Boolean);
 
@@ -452,22 +371,12 @@ const mapImagesForStorage = (images) =>
           ? image.mimeType.trim()
           : typeof image?.mime_type === 'string' && image.mime_type.trim().length > 0
           ? image.mime_type.trim()
-          : '';
+          : 'image/png';
 
-      const payload = {
+      return {
         url,
-        ...(mimeType ? { mime_type: mimeType } : {}),
+        mimeType,
       };
-
-      if (typeof image?.name === 'string' && image.name.trim().length > 0) {
-        payload.name = image.name.trim();
-      }
-
-      if (typeof image?.size === 'number' && Number.isFinite(image.size)) {
-        payload.size = image.size;
-      }
-
-      return payload;
     })
     .filter(Boolean);
 
@@ -485,58 +394,9 @@ const DEFAULT_SETTINGS = {
   instructions: '',
 };
 
-const DEFAULT_STORAGE_CANDIDATES = Array.from(
-  new Set([
-    'auiki-x-eataly.firebasestorage.app',
-    'auiki-x-eataly.appspot.com',
-    ...(Array.isArray(STORAGE_BUCKET_CANDIDATES) ? STORAGE_BUCKET_CANDIDATES : []),
-  ])
-);
-
-const corsTestCache = new Map();
-const CORS_CACHE_TTL = 60_000;
-
 const wait = (ms) => new Promise((resolve) => {
   setTimeout(resolve, ms);
 });
-
-const testFirebaseCors = async (bucketHost) => {
-  const cacheKey = bucketHost || 'default';
-  const cached = corsTestCache.get(cacheKey);
-  const now = Date.now();
-
-  if (cached && now - cached.timestamp < CORS_CACHE_TTL) {
-    return cached.ok;
-  }
-
-  const endpoint = `https://firebasestorage.googleapis.com/v0/b/${bucketHost}/o`;
-
-  try {
-    const response = await fetch(endpoint, {
-      method: 'OPTIONS',
-      mode: 'cors',
-    });
-
-    const allowOrigin = response.headers.get('access-control-allow-origin');
-    const ok = response.ok && Boolean(allowOrigin);
-
-    if (ok) {
-      console.log(`[CORS TEST] Firebase Storage attivo ✅ (${bucketHost})`);
-    } else {
-      console.warn(`[CORS TEST] Firebase Storage non attivo ❌ (${bucketHost})`, {
-        status: response.status,
-        allowOrigin,
-      });
-    }
-
-    corsTestCache.set(cacheKey, { ok, timestamp: now });
-    return ok;
-  } catch (error) {
-    console.error(`[CORS TEST] Firebase Storage (${bucketHost}) fallito ❌`, error);
-    corsTestCache.set(cacheKey, { ok: false, timestamp: now });
-    return false;
-  }
-};
 
 const isLikelyCorsError = (error) => {
   if (!error) {
@@ -995,31 +855,19 @@ function App() {
       }
 
       if (attachmentsWithFile.length > 0) {
-        const corsOk = await testFirebaseCors(primaryStorageBucket);
-        if (!corsOk) {
-          const corsErrorMessage =
-            '⚠️ Il bucket Firebase non accetta upload da questo dominio. Verifica la configurazione CORS su Firebase Storage.';
-          console.warn(
-            `[CORS TEST] Firebase Storage (${primaryStorageBucket}) non attivo per questo dominio.`
+        try {
+          uploadedImages = await uploadAttachmentsToStorage(
+            attachmentsWithFile,
+            user.uid,
+            onUploadStatusChange
           );
-          setError(corsErrorMessage);
-          attachmentsWithFile.forEach((attachment, index) => {
-            const attachmentId =
-              typeof attachment?.id === 'string' && attachment.id.trim().length > 0
-                ? attachment.id
-                : `${index}`;
-            onUploadStatusChange?.(attachmentId, 'error', {
-              error: new Error(corsErrorMessage),
-            });
-          });
-          throw new Error(corsErrorMessage);
+        } catch (uploadError) {
+          console.error('[UPLOAD ERROR]', uploadError);
+          const errorMessage =
+            uploadError?.message || 'Errore durante l\'upload delle immagini su Firebase Storage.';
+          setError(`⚠️ ${errorMessage}`);
+          throw uploadError;
         }
-
-        uploadedImages = await uploadAttachmentsToStorage(
-          attachmentsWithFile,
-          user.uid,
-          onUploadStatusChange
-        );
       }
 
       const uiUploadedImages = mapImagesForUi(uploadedImages);
