@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { getFirestore, enableNetwork } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 
 // Firebase configuration - uses ONLY Vercel environment variables
@@ -37,5 +37,23 @@ export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const storage = getStorage(app);
 
+// CRITICAL: Force Firestore to connect online immediately
+// This prevents "client is offline" errors
+(async () => {
+  try {
+    await enableNetwork(db);
+    console.log('[Firebase] ✅ Firestore network enabled - forced online connection');
+  } catch (networkError) {
+    console.error('[Firebase] ❌ CRITICAL: Failed to enable Firestore network:', {
+      code: networkError?.code,
+      message: networkError?.message,
+      name: networkError?.name,
+    });
+    // Don't throw here - let the app continue, but log the error
+  }
+})();
+
 console.log('[Firebase] Initialized successfully');
 console.log('[Firebase] Project ID:', firebaseConfig.projectId);
+console.log('[Firebase] Storage Bucket:', firebaseConfig.storageBucket);
+console.log('[Firebase] Auth Domain:', firebaseConfig.authDomain);

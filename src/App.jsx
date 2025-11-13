@@ -597,8 +597,18 @@ function App() {
 
   const loadUserPreferences = useCallback(async (uid) => {
     try {
+      // Ensure Firestore is online before attempting to read
       const userDocRef = doc(db, 'users', uid);
-      const snapshot = await getDoc(userDocRef);
+      
+      // Add timeout to detect if Firestore is truly offline
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Firestore request timeout - database may be offline or not enabled')), 10000)
+      );
+      
+      const snapshot = await Promise.race([
+        getDoc(userDocRef),
+        timeoutPromise
+      ]);
 
       if (snapshot.exists()) {
         const data = snapshot.data();
