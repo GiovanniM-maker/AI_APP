@@ -542,6 +542,34 @@ function App() {
       );
       console.groupEnd();
       console.groupEnd();
+
+      // Test Firestore connection (async)
+      (async () => {
+        console.group('%c[Firestore Connection Test]', 'color:#8b5cf6;font-weight:bold;');
+        try {
+          const testDocRef = doc(db, '_test', 'connection');
+          await getDoc(testDocRef);
+          console.log('%c✓ Firestore connection test successful', 'color:#10b981;font-weight:bold;');
+        } catch (testErr) {
+          const testErrorCode = testErr?.code || '';
+          const testErrorMessage = testErr?.message || '';
+          console.error('%c✗ Firestore connection test failed', 'color:#ef4444;font-weight:bold;', {
+            errorCode: testErrorCode,
+            errorMessage: testErrorMessage,
+            errorName: testErr?.name,
+            projectId: db.app.options?.projectId,
+          });
+          if (testErrorCode === 'unavailable' || testErrorMessage.includes('offline')) {
+            console.error('%c⚠️ Firestore is offline. Check:', 'color:#f59e0b;font-weight:bold;', {
+              '1. Environment variables': 'Verify all VITE_FIREBASE_* vars are set in Vercel',
+              '2. Project ID': db.app.options?.projectId,
+              '3. Firebase project status': 'Check if project is active and billing is enabled',
+              '4. Firestore rules': 'Verify security rules allow read access',
+            });
+          }
+        }
+        console.groupEnd();
+      })();
     } catch (err) {
       console.error('%c[Debug] Bootstrap diagnostics failed', 'color:#ef4444;font-weight:bold;', err);
     }
@@ -617,11 +645,23 @@ function App() {
       if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
         console.error('[Firestore] Client offline. Check Firebase configuration:', {
           projectId: db.app.options?.projectId,
-          error: err,
+          errorCode: err?.code,
+          errorMessage: err?.message,
+          errorName: err?.name,
+          fullError: err,
+          firebaseConfig: {
+            projectId: db.app.options?.projectId,
+            apiKey: db.app.options?.apiKey ? 'SET' : 'MISSING',
+            authDomain: db.app.options?.authDomain,
+          },
         });
         setError('⚠️ Impossibile connettersi a Firestore. Verifica la configurazione Firebase.');
       } else {
-        console.error('Impossibile caricare le preferenze utente', err);
+        console.error('Impossibile caricare le preferenze utente', {
+          errorCode: err?.code,
+          errorMessage: err?.message,
+          error: err,
+        });
       }
       setSettings(DEFAULT_SETTINGS);
     } finally {
@@ -679,11 +719,18 @@ function App() {
         if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
           console.error('[Firestore] Client offline during chat subscription:', {
             projectId: db.app.options?.projectId,
-            error: err,
+            errorCode: err?.code,
+            errorMessage: err?.message,
+            errorName: err?.name,
+            fullError: err,
           });
           setError('⚠️ Impossibile connettersi a Firestore. Verifica la configurazione Firebase.');
         } else {
-          console.error('Errore nel recupero delle chat', err);
+          console.error('Errore nel recupero delle chat', {
+            errorCode: err?.code,
+            errorMessage: err?.message,
+            error: err,
+          });
         }
       }
     );

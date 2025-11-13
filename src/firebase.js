@@ -73,17 +73,40 @@ if (existingApps.length > 0) {
 }
 
 const auth = getAuth(app);
+
+// Initialize Firestore
+// Note: Firebase SDK uses internal retry logic and connection management.
+// Stack traces showing setTimeout/Promise chains are normal and indicate
+// the SDK is managing persistent connections and automatic reconnection.
 const db = getFirestore(app);
+
 const storage = getStorage(app);
 
 console.log('[Firebase] FIREBASE PROJECT ID:', firebaseConfig.projectId);
 console.log('[Firebase] Firestore instance created:', db.app.name);
 console.log('[Firebase] Firestore project:', db.app.options.projectId);
 
+// Log all environment variables for debugging
+console.group('[Firebase] Environment Variables Check');
+REQUIRED_ENV_VARS.forEach((key) => {
+  const value = import.meta.env[key];
+  const isSet = value && typeof value === 'string' && value.trim().length > 0;
+  console.log(`${key}: ${isSet ? '✅ SET' : '❌ MISSING'}`, isSet ? '(hidden)' : '');
+});
+console.groupEnd();
+
 if (import.meta.env.MODE === 'production') {
   console.log('[Firebase] Production mode - verifying configuration...');
   if (firebaseConfig.projectId !== 'eataly-creative-ai-suite') {
     console.error('[Firebase] ⚠️ WARNING: Project ID mismatch! Expected: eataly-creative-ai-suite, Got:', firebaseConfig.projectId);
+  }
+  
+  // Verify all required vars are set in production
+  const missingInProd = REQUIRED_ENV_VARS.filter(
+    (key) => !import.meta.env[key] || typeof import.meta.env[key] !== 'string' || import.meta.env[key].trim().length === 0
+  );
+  if (missingInProd.length > 0) {
+    console.error('[Firebase] ⚠️ CRITICAL: Missing environment variables in production:', missingInProd);
   }
 }
 
