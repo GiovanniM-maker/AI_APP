@@ -19,12 +19,12 @@ import {
   setDoc,
   where,
 } from 'firebase/firestore';
-import { getApps } from 'firebase/app';
 import Login from './components/Login.jsx';
 import Chat from './components/Chat.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { auth, db, storage } from './firebase.js';
+import { checkFirestoreConnection, resetFirestorePersistence } from './utils/firestoreDiagnostics.js';
 import { DEFAULT_MODEL, MODEL_OPTIONS, getModelMeta } from './constants/models.js';
 
 const normalizeImages = (rawImages) => {
@@ -398,6 +398,41 @@ const wait = (ms) => new Promise((resolve) => {
   setTimeout(resolve, ms);
 });
 
+/**
+ * Retry Firestore operation if error code is "unavailable"
+ * @param {Function} operation - Firestore operation to retry
+ * @param {number} maxRetries - Maximum number of retries (default: 1)
+ * @param {number} delayMs - Delay between retries in ms (default: 1000)
+ * @returns {Promise} Result of the operation
+ */
+const retryFirestoreOperation = async (operation, maxRetries = 1, delayMs = 1000) => {
+  let lastError;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      const errorCode = error?.code || '';
+      const errorMessage = error?.message || '';
+      
+      // Only retry on "unavailable" errors
+      if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
+        if (attempt < maxRetries) {
+          console.warn(`[FIRESTORE] Retry attempt ${attempt + 1}/${maxRetries} after unavailable error`);
+          await wait(delayMs);
+          continue;
+        }
+      }
+      
+      // For other errors or max retries reached, throw immediately
+      throw error;
+    }
+  }
+  
+  throw lastError;
+};
+
 const isLikelyCorsError = (error) => {
   if (!error) {
     return false;
@@ -480,17 +515,6 @@ function App() {
 
     try {
       const envKeys = Object.keys(import.meta.env ?? {}).sort();
-      let firebaseApps = [];
-
-      try {
-        firebaseApps = getApps();
-      } catch (firebaseError) {
-        console.error(
-          '%c[Debug] Firebase getApps() failed',
-          'color:#ef4444;font-weight:bold;',
-          firebaseError
-        );
-      }
 
       console.groupCollapsed(
         '%c[Gemini Debug] App bootstrap diagnostics',
@@ -514,11 +538,15 @@ function App() {
 
       console.group('%cFirebase', 'color:#f97316;font-weight:bold;');
       console.log(
-        '%cgetApps().length%c %d (%s)',
+        '%cFirebase initialized%c ✅',
+        'color:#475569;font-weight:500;',
+        'color:#94a3b8;margin-left:8px;'
+      );
+      console.log(
+        '%cProject ID%c %s',
         'color:#475569;font-weight:500;',
         'color:#94a3b8;margin-left:8px;',
-        firebaseApps.length,
-        firebaseApps.length > 0 ? '✅ inizializzato' : '⚠️ nessuna app'
+        db.app.options?.projectId || 'N/D'
       );
       console.groupEnd();
 
@@ -543,6 +571,20 @@ function App() {
       console.groupEnd();
       console.groupEnd();
 
+      // Test Firestore connection on startup
+      (async () => {
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for Firebase init
+        const connectionStatus = await checkFirestoreConnection();
+        if (!connectionStatus.connected) {
+          console.warn('[FIRESTORE] Connection test failed, attempting persistence reset...');
+          await resetFirestorePersistence();
+          // Retry connection check
+          const retryStatus = await checkFirestoreConnection();
+          if (!retryStatus.connected) {
+            console.error('[FIRESTORE] ❌ Connection still failed after reset. Check Firebase Console.');
+          }
+        }
+      })();
     } catch (err) {
       console.error('%c[Debug] Bootstrap diagnostics failed', 'color:#ef4444;font-weight:bold;', err);
     }
@@ -597,18 +639,11 @@ function App() {
 
   const loadUserPreferences = useCallback(async (uid) => {
     try {
-      // Ensure Firestore is online before attempting to read
       const userDocRef = doc(db, 'users', uid);
       
-      // Add timeout to detect if Firestore is truly offline
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Firestore request timeout - database may be offline or not enabled')), 10000)
-      );
-      
-      const snapshot = await Promise.race([
-        getDoc(userDocRef),
-        timeoutPromise
-      ]);
+      const snapshot = await retryFirestoreOperation(async () => {
+        return await getDoc(userDocRef);
+      });
 
       if (snapshot.exists()) {
         const data = snapshot.data();
@@ -699,21 +734,29 @@ function App() {
         const errorCode = err?.code || '';
         const errorMessage = err?.message || '';
         
+        console.error('[FIRESTORE] Error in chat subscription:', {
+          projectId: db.app.options?.projectId,
+          errorCode,
+          errorMessage,
+          errorName: err?.name,
+          error: err,
+        });
+        
         if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
-          console.error('[Firestore] Client offline during chat subscription:', {
-            projectId: db.app.options?.projectId,
-            errorCode: err?.code,
-            errorMessage: err?.message,
-            errorName: err?.name,
-            fullError: err,
-          });
+          console.error('[FIRESTORE] Client offline during chat subscription');
           setError('⚠️ Impossibile connettersi a Firestore. Verifica la configurazione Firebase.');
+          
+          // Attempt to reset persistence and retry
+          (async () => {
+            try {
+              await resetFirestorePersistence();
+              console.log('[FIRESTORE] Persistence reset complete, subscription should reconnect');
+            } catch (resetError) {
+              console.error('[FIRESTORE] Failed to reset persistence:', resetError);
+            }
+          })();
         } else {
-          console.error('Errore nel recupero delle chat', {
-            errorCode: err?.code,
-            errorMessage: err?.message,
-            error: err,
-          });
+          console.error('[FIRESTORE] Non-offline error in chat subscription');
         }
       }
     );
@@ -746,23 +789,25 @@ function App() {
 
       const timeout = setTimeout(() => {
       const userDocRef = doc(db, 'users', user.uid);
-      setDoc(
-        userDocRef,
-        {
-          preferences: {
-            model: settings.model,
-            temperature: settings.temperature,
-            topP: settings.topP,
-            instructions: settings.instructions,
+      retryFirestoreOperation(async () => {
+        return await setDoc(
+          userDocRef,
+          {
+            preferences: {
+              model: settings.model,
+              temperature: settings.temperature,
+              topP: settings.topP,
+              instructions: settings.instructions,
+            },
           },
-        },
-        { merge: true }
-      ).catch((err) => {
+          { merge: true }
+        );
+      }).catch((err) => {
         const errorCode = err?.code || '';
         const errorMessage = err?.message || '';
         
         if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
-          console.error('[Firestore] Client offline during preferences save:', {
+          console.error('[FIRESTORE] Client offline during preferences save:', {
             projectId: db.app.options?.projectId,
             error: err,
           });
@@ -823,7 +868,10 @@ function App() {
       };
 
       try {
-        const chatRef = await addDoc(collection(db, 'chats'), chatPayload);
+        const chatRef = await retryFirestoreOperation(async () => {
+          return await addDoc(collection(db, 'chats'), chatPayload);
+        });
+        
         const newChat = {
           id: chatRef.id,
           title: chatTitle,
@@ -838,14 +886,13 @@ function App() {
         const errorCode = firestoreError?.code || '';
         const errorMessage = firestoreError?.message || '';
         
-        if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
-          console.error('[Firestore] Client offline during addDoc:', {
-            projectId: db.app.options?.projectId,
-            error: firestoreError,
-          });
-          throw new Error('⚠️ Impossibile creare la chat. Verifica la configurazione Firebase.');
-        }
-        throw firestoreError;
+        console.error('[FIRESTORE] Failed to create chat after retry:', {
+          projectId: db.app.options?.projectId,
+          errorCode,
+          errorMessage,
+          error: firestoreError,
+        });
+        throw new Error('⚠️ Impossibile creare la chat. Verifica la configurazione Firebase.');
       }
     },
     [user]
@@ -1011,28 +1058,29 @@ function App() {
         });
 
         try {
-          await setDoc(
-            chatRef,
-            {
-              userId: user.uid,
-              title: title || 'Nuova chat',
-              messages: serializeMessagesForStorage(updatedMessages),
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
-          );
+          await retryFirestoreOperation(async () => {
+            return await setDoc(
+              chatRef,
+              {
+                userId: user.uid,
+                title: title || 'Nuova chat',
+                messages: serializeMessagesForStorage(updatedMessages),
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true }
+            );
+          });
         } catch (firestoreError) {
           const errorCode = firestoreError?.code || '';
           const errorMessage = firestoreError?.message || '';
           
-          if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
-            console.error('[Firestore] Client offline during setDoc:', {
-              projectId: db.app.options?.projectId,
-              error: firestoreError,
-            });
-            throw new Error('⚠️ Impossibile salvare su Firestore. Verifica la configurazione Firebase.');
-          }
-          throw firestoreError;
+          console.error('[FIRESTORE] Failed to save user message after retry:', {
+            projectId: db.app.options?.projectId,
+            errorCode,
+            errorMessage,
+            error: firestoreError,
+          });
+          throw new Error('⚠️ Impossibile salvare su Firestore. Verifica la configurazione Firebase.');
         }
 
         const meta = getModelMeta(selectedModelMeta.value);
@@ -1137,27 +1185,27 @@ function App() {
         });
 
         try {
-          await setDoc(
-            chatRef,
-            {
-              messages: serializeMessagesForStorage(finalMessages),
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
-          );
+          await retryFirestoreOperation(async () => {
+            return await setDoc(
+              chatRef,
+              {
+                messages: serializeMessagesForStorage(finalMessages),
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true }
+            );
+          });
         } catch (firestoreError) {
           const errorCode = firestoreError?.code || '';
           const errorMessage = firestoreError?.message || '';
           
-          if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
-            console.error('[Firestore] Client offline during setDoc (final messages):', {
-              projectId: db.app.options?.projectId,
-              error: firestoreError,
-            });
-            setError('⚠️ Impossibile salvare su Firestore. Verifica la configurazione Firebase.');
-          } else {
-            throw firestoreError;
-          }
+          console.error('[FIRESTORE] Failed to save final messages after retry:', {
+            projectId: db.app.options?.projectId,
+            errorCode,
+            errorMessage,
+            error: firestoreError,
+          });
+          setError('⚠️ Impossibile salvare su Firestore. Verifica la configurazione Firebase.');
         }
 
         resetStreaming();

@@ -1,6 +1,11 @@
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore, enableNetwork } from 'firebase/firestore';
+import { 
+  getFirestore, 
+  enableNetwork, 
+  enableIndexedDbPersistence,
+  clearIndexedDbPersistence 
+} from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 
 // Firebase configuration - uses ONLY Vercel environment variables
@@ -29,31 +34,83 @@ if (missingKeys.length > 0) {
   throw new Error(errorMsg);
 }
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
+// Initialize Firebase app - ensure only ONE instance exists
+let app;
+const existingApps = getApps();
+
+if (existingApps.length > 0) {
+  app = getApp();
+  console.log('[FIRESTORE] Reusing existing Firebase app:', app.name);
+} else {
+  app = initializeApp(firebaseConfig);
+  console.log('[FIRESTORE] App initialized:', app.name);
+}
 
 // Initialize Firebase services
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const storage = getStorage(app);
 
-// CRITICAL: Force Firestore to connect online immediately
-// This prevents "client is offline" errors
-(async () => {
+console.log('[FIRESTORE] Project ID:', firebaseConfig.projectId);
+console.log('[FIRESTORE] Storage Bucket:', firebaseConfig.storageBucket);
+console.log('[FIRESTORE] Auth Domain:', firebaseConfig.authDomain);
+
+// Enable IndexedDB persistence with automatic fallback
+let persistenceEnabled = false;
+const enablePersistence = async () => {
+  try {
+    await enableIndexedDbPersistence(db);
+    persistenceEnabled = true;
+    console.log('[FIRESTORE] Persistence enabled');
+  } catch (error) {
+    const errorCode = error?.code || '';
+    const errorMessage = error?.message || '';
+    
+    if (errorCode === 'failed-precondition') {
+      console.warn('[FIRESTORE] Persistence failed - multiple tabs open. Using online-only mode.');
+    } else if (errorCode === 'unimplemented') {
+      console.warn('[FIRESTORE] Persistence not supported in this environment. Using online-only mode.');
+    } else {
+      console.warn('[FIRESTORE] Persistence error, attempting to clear and retry:', errorCode);
+      
+      // Try to clear corrupted persistence and retry
+      try {
+        await clearIndexedDbPersistence(db);
+        await enableIndexedDbPersistence(db);
+        persistenceEnabled = true;
+        console.log('[FIRESTORE] Persistence enabled after clearing corrupted data');
+      } catch (retryError) {
+        console.warn('[FIRESTORE] Could not enable persistence after clear. Using online-only mode.');
+      }
+    }
+  }
+};
+
+// Force Firestore to connect online immediately
+// This is CRITICAL to prevent "client is offline" errors
+const enableNetworkConnection = async () => {
   try {
     await enableNetwork(db);
-    console.log('[Firebase] ✅ Firestore network enabled - forced online connection');
+    console.log('[FIRESTORE] Network enabled - forced online connection');
   } catch (networkError) {
-    console.error('[Firebase] ❌ CRITICAL: Failed to enable Firestore network:', {
+    console.error('[FIRESTORE] ❌ CRITICAL: Failed to enable Firestore network:', {
       code: networkError?.code,
       message: networkError?.message,
       name: networkError?.name,
     });
-    // Don't throw here - let the app continue, but log the error
+    throw networkError;
+  }
+};
+
+// Initialize persistence and network asynchronously
+(async () => {
+  try {
+    await enablePersistence();
+    await enableNetworkConnection();
+    console.log('[FIRESTORE] Initialization complete - ready for use');
+  } catch (error) {
+    console.error('[FIRESTORE] ❌ Initialization failed:', error);
   }
 })();
 
-console.log('[Firebase] Initialized successfully');
-console.log('[Firebase] Project ID:', firebaseConfig.projectId);
-console.log('[Firebase] Storage Bucket:', firebaseConfig.storageBucket);
-console.log('[Firebase] Auth Domain:', firebaseConfig.authDomain);
+export { app };
