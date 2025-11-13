@@ -1,6 +1,6 @@
 import { initializeApp, getApp, getApps } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore, enableNetwork, disableNetwork } from 'firebase/firestore';
+import { getFirestore, enableNetwork, disableNetwork, doc, getDoc } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 
 const REQUIRED_ENV_VARS = [
@@ -74,22 +74,56 @@ if (existingApps.length > 0) {
 
 const auth = getAuth(app);
 
-// Initialize Firestore
+// Initialize Firestore with explicit settings
 // Note: Firebase SDK uses internal retry logic and connection management.
 // Stack traces showing setTimeout/Promise chains are normal and indicate
 // the SDK is managing persistent connections and automatic reconnection.
 const db = getFirestore(app);
 
-// Force Firestore to connect online (disable offline persistence if enabled)
-// This ensures Firestore tries to connect immediately
-(async () => {
+// Log Firestore initialization details
+console.log('[Firebase] Firestore initialized:', {
+  appName: db.app.name,
+  projectId: db.app.options?.projectId,
+  databaseId: db._databaseId?.databaseId || 'default',
+  settings: db._settings || 'default',
+});
+
+// Force Firestore to connect online immediately
+// This is critical to prevent "offline" errors
+let networkEnabled = false;
+const enableFirestoreNetwork = async () => {
   try {
     await enableNetwork(db);
-    console.log('[Firebase] Firestore network enabled - forcing online connection');
+    networkEnabled = true;
+    console.log('[Firebase] ✅ Firestore network enabled - connection forced online');
+    
+    // Verify connection with a test query
+    try {
+      const testRef = doc(db, '_health', 'check');
+      await getDoc(testRef);
+      console.log('[Firebase] ✅ Firestore connection verified');
+    } catch (testError) {
+      console.warn('[Firebase] ⚠️ Firestore network enabled but test query failed:', {
+        code: testError?.code,
+        message: testError?.message,
+      });
+    }
   } catch (networkError) {
-    console.warn('[Firebase] Could not enable Firestore network:', networkError);
+    console.error('[Firebase] ❌ CRITICAL: Could not enable Firestore network:', {
+      code: networkError?.code,
+      message: networkError?.message,
+      name: networkError?.name,
+      stack: networkError?.stack,
+    });
+    networkEnabled = false;
   }
-})();
+};
+
+// Enable network immediately (don't wait, but log the promise)
+const networkPromise = enableFirestoreNetwork();
+networkPromise.catch((err) => {
+  console.error('[Firebase] ❌ Network enable promise rejected:', err);
+});
 
 const storage = getStorage(app);
 
@@ -134,6 +168,34 @@ if (import.meta.env.MODE === 'production') {
     console.error('[Firebase] ⚠️ CRITICAL: Missing environment variables in production:', missingInProd);
   }
 }
+
+// Export helper function to check Firestore connection status
+export const checkFirestoreConnection = async () => {
+  const status = {
+    networkEnabled: networkEnabled,
+    projectId: db.app.options?.projectId,
+    timestamp: new Date().toISOString(),
+  };
+
+  try {
+    // Try a simple read operation
+    const testRef = doc(db, '_health', 'connection-test');
+    await getDoc(testRef);
+    status.connected = true;
+    status.error = null;
+    console.log('[Firebase] ✅ Connection check: SUCCESS', status);
+  } catch (error) {
+    status.connected = false;
+    status.error = {
+      code: error?.code,
+      message: error?.message,
+      name: error?.name,
+    };
+    console.error('[Firebase] ❌ Connection check: FAILED', status);
+  }
+
+  return status;
+};
 
 export { app, auth, db, storage };
 

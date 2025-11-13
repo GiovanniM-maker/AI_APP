@@ -24,7 +24,7 @@ import Login from './components/Login.jsx';
 import Chat from './components/Chat.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { auth, db, storage } from './firebase.js';
+import { auth, db, storage, checkFirestoreConnection } from './firebase.js';
 import { DEFAULT_MODEL, MODEL_OPTIONS, getModelMeta } from './constants/models.js';
 
 const normalizeImages = (rawImages) => {
@@ -543,31 +543,47 @@ function App() {
       console.groupEnd();
       console.groupEnd();
 
-      // Test Firestore connection (async)
+      // Test Firestore connection with detailed diagnostics
       (async () => {
         console.group('%c[Firestore Connection Test]', 'color:#8b5cf6;font-weight:bold;');
+        
+        // Wait a bit for network to be enabled
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
         try {
-          const testDocRef = doc(db, '_test', 'connection');
-          await getDoc(testDocRef);
-          console.log('%c✓ Firestore connection test successful', 'color:#10b981;font-weight:bold;');
-        } catch (testErr) {
-          const testErrorCode = testErr?.code || '';
-          const testErrorMessage = testErr?.message || '';
-          console.error('%c✗ Firestore connection test failed', 'color:#ef4444;font-weight:bold;', {
-            errorCode: testErrorCode,
-            errorMessage: testErrorMessage,
-            errorName: testErr?.name,
-            projectId: db.app.options?.projectId,
-          });
-          if (testErrorCode === 'unavailable' || testErrorMessage.includes('offline')) {
-            console.error('%c⚠️ Firestore is offline. Check:', 'color:#f59e0b;font-weight:bold;', {
-              '1. Environment variables': 'Verify all VITE_FIREBASE_* vars are set in Vercel',
-              '2. Project ID': db.app.options?.projectId,
-              '3. Firebase project status': 'Check if project is active and billing is enabled',
-              '4. Firestore rules': 'Verify security rules allow read access',
-            });
+          const status = await checkFirestoreConnection();
+          
+          if (status.connected) {
+            console.log('%c✓ Firestore connection test successful', 'color:#10b981;font-weight:bold;', status);
+          } else {
+            console.error('%c✗ Firestore connection test failed', 'color:#ef4444;font-weight:bold;', status);
+            
+            if (status.error?.code === 'unavailable' || status.error?.message?.includes('offline')) {
+              console.error('%c⚠️ Firestore is offline. Detailed diagnostics:', 'color:#f59e0b;font-weight:bold;');
+              console.error('Error details:', {
+                code: status.error.code,
+                message: status.error.message,
+                name: status.error.name,
+              });
+              console.error('Configuration:', {
+                projectId: status.projectId,
+                networkEnabled: status.networkEnabled,
+              });
+              console.error('%c🔍 Troubleshooting steps:', 'color:#f59e0b;font-weight:bold;');
+              console.error('1. Verify Firestore is enabled in Firebase Console');
+              console.error('2. Check Firestore security rules (should allow read for testing)');
+              console.error('3. Verify billing is enabled for the project');
+              console.error('4. Check network connectivity and CORS settings');
+              console.error('5. Verify all VITE_FIREBASE_* environment variables are set correctly');
+            } else if (status.error?.code === 'permission-denied') {
+              console.error('%c⚠️ Permission denied. Check Firestore security rules:', 'color:#f59e0b;font-weight:bold;');
+              console.error('Firestore rules should allow read access for testing');
+            }
           }
+        } catch (testErr) {
+          console.error('%c✗ Connection test threw exception:', 'color:#ef4444;font-weight:bold;', testErr);
         }
+        
         console.groupEnd();
       })();
     } catch (err) {
