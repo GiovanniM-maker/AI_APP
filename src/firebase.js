@@ -1,6 +1,6 @@
 import { initializeApp, getApp, getApps } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { getFirestore, enableNetwork, disableNetwork } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 
 const REQUIRED_ENV_VARS = [
@@ -80,6 +80,17 @@ const auth = getAuth(app);
 // the SDK is managing persistent connections and automatic reconnection.
 const db = getFirestore(app);
 
+// Force Firestore to connect online (disable offline persistence if enabled)
+// This ensures Firestore tries to connect immediately
+(async () => {
+  try {
+    await enableNetwork(db);
+    console.log('[Firebase] Firestore network enabled - forcing online connection');
+  } catch (networkError) {
+    console.warn('[Firebase] Could not enable Firestore network:', networkError);
+  }
+})();
+
 const storage = getStorage(app);
 
 console.log('[Firebase] FIREBASE PROJECT ID:', firebaseConfig.projectId);
@@ -91,7 +102,21 @@ console.group('[Firebase] Environment Variables Check');
 REQUIRED_ENV_VARS.forEach((key) => {
   const value = import.meta.env[key];
   const isSet = value && typeof value === 'string' && value.trim().length > 0;
-  console.log(`${key}: ${isSet ? '✅ SET' : '❌ MISSING'}`, isSet ? '(hidden)' : '');
+  if (isSet) {
+    // Show first 10 chars and last 4 chars for verification (without exposing full value)
+    const preview = value.length > 14 
+      ? `${value.substring(0, 10)}...${value.substring(value.length - 4)}`
+      : '***';
+    console.log(`${key}: ✅ SET (${value.length} chars, preview: ${preview})`);
+  } else {
+    console.error(`${key}: ❌ MISSING`);
+  }
+});
+console.log('Full config check:', {
+  apiKey: firebaseConfig.apiKey ? `SET (${firebaseConfig.apiKey.length} chars)` : 'MISSING',
+  projectId: firebaseConfig.projectId,
+  authDomain: firebaseConfig.authDomain,
+  storageBucket: firebaseConfig.storageBucket,
 });
 console.groupEnd();
 
