@@ -611,7 +611,18 @@ function App() {
         setSettings(DEFAULT_SETTINGS);
       }
     } catch (err) {
-      console.error('Impossibile caricare le preferenze utente', err);
+      const errorCode = err?.code || '';
+      const errorMessage = err?.message || '';
+      
+      if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
+        console.error('[Firestore] Client offline. Check Firebase configuration:', {
+          projectId: db.app.options?.projectId,
+          error: err,
+        });
+        setError('⚠️ Impossibile connettersi a Firestore. Verifica la configurazione Firebase.');
+      } else {
+        console.error('Impossibile caricare le preferenze utente', err);
+      }
       setSettings(DEFAULT_SETTINGS);
     } finally {
       setIsSettingsLoaded(true);
@@ -662,7 +673,18 @@ function App() {
         });
       },
       (err) => {
-        console.error('Errore nel recupero delle chat', err);
+        const errorCode = err?.code || '';
+        const errorMessage = err?.message || '';
+        
+        if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
+          console.error('[Firestore] Client offline during chat subscription:', {
+            projectId: db.app.options?.projectId,
+            error: err,
+          });
+          setError('⚠️ Impossibile connettersi a Firestore. Verifica la configurazione Firebase.');
+        } else {
+          console.error('Errore nel recupero delle chat', err);
+        }
       }
     );
   }, []);
@@ -706,7 +728,17 @@ function App() {
         },
         { merge: true }
       ).catch((err) => {
-        console.error('Impossibile salvare le preferenze', err);
+        const errorCode = err?.code || '';
+        const errorMessage = err?.message || '';
+        
+        if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
+          console.error('[Firestore] Client offline during preferences save:', {
+            projectId: db.app.options?.projectId,
+            error: err,
+          });
+        } else {
+          console.error('Impossibile salvare le preferenze', err);
+        }
       });
     }, 500);
 
@@ -760,17 +792,31 @@ function App() {
         updatedAt: serverTimestamp(),
       };
 
-      const chatRef = await addDoc(collection(db, 'chats'), chatPayload);
-      const newChat = {
-        id: chatRef.id,
-        title: chatTitle,
-        messages: [],
-        updatedAt: Date.now(),
-      };
+      try {
+        const chatRef = await addDoc(collection(db, 'chats'), chatPayload);
+        const newChat = {
+          id: chatRef.id,
+          title: chatTitle,
+          messages: [],
+          updatedAt: Date.now(),
+        };
 
-      setChats((prev) => [newChat, ...prev.filter((chat) => chat.id !== chatRef.id)]);
+        setChats((prev) => [newChat, ...prev.filter((chat) => chat.id !== chatRef.id)]);
 
-      return chatRef.id;
+        return chatRef.id;
+      } catch (firestoreError) {
+        const errorCode = firestoreError?.code || '';
+        const errorMessage = firestoreError?.message || '';
+        
+        if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
+          console.error('[Firestore] Client offline during addDoc:', {
+            projectId: db.app.options?.projectId,
+            error: firestoreError,
+          });
+          throw new Error('⚠️ Impossibile creare la chat. Verifica la configurazione Firebase.');
+        }
+        throw firestoreError;
+      }
     },
     [user]
   );
@@ -934,16 +980,30 @@ function App() {
           ];
         });
 
-        await setDoc(
-          chatRef,
-          {
-            userId: user.uid,
-            title: title || 'Nuova chat',
-            messages: serializeMessagesForStorage(updatedMessages),
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true }
-        );
+        try {
+          await setDoc(
+            chatRef,
+            {
+              userId: user.uid,
+              title: title || 'Nuova chat',
+              messages: serializeMessagesForStorage(updatedMessages),
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+        } catch (firestoreError) {
+          const errorCode = firestoreError?.code || '';
+          const errorMessage = firestoreError?.message || '';
+          
+          if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
+            console.error('[Firestore] Client offline during setDoc:', {
+              projectId: db.app.options?.projectId,
+              error: firestoreError,
+            });
+            throw new Error('⚠️ Impossibile salvare su Firestore. Verifica la configurazione Firebase.');
+          }
+          throw firestoreError;
+        }
 
         const meta = getModelMeta(selectedModelMeta.value);
         console.log(
@@ -1046,14 +1106,29 @@ function App() {
           ];
         });
 
-        await setDoc(
-          chatRef,
-          {
-            messages: serializeMessagesForStorage(finalMessages),
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true }
-        );
+        try {
+          await setDoc(
+            chatRef,
+            {
+              messages: serializeMessagesForStorage(finalMessages),
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+        } catch (firestoreError) {
+          const errorCode = firestoreError?.code || '';
+          const errorMessage = firestoreError?.message || '';
+          
+          if (errorCode === 'unavailable' || errorMessage.includes('offline')) {
+            console.error('[Firestore] Client offline during setDoc (final messages):', {
+              projectId: db.app.options?.projectId,
+              error: firestoreError,
+            });
+            setError('⚠️ Impossibile salvare su Firestore. Verifica la configurazione Firebase.');
+          } else {
+            throw firestoreError;
+          }
+        }
 
         resetStreaming();
       } catch (err) {

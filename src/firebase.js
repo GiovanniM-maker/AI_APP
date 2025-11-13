@@ -3,21 +3,89 @@ import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 
-const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || 'AIzaSyBfW-DJsytPbGbIutbYfd9kXO9y7jCqCEg',
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || 'eataly-creative-ai-suite.firebaseapp.com',
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || 'eataly-creative-ai-suite',
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || 'eataly-creative-ai-suite.appspot.com',
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '392418318075',
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || '1:392418318075:web:3c1aa88df71dca64da425e',
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || 'G-GSE68WH3P9',
+const REQUIRED_ENV_VARS = [
+  'VITE_FIREBASE_API_KEY',
+  'VITE_FIREBASE_AUTH_DOMAIN',
+  'VITE_FIREBASE_PROJECT_ID',
+  'VITE_FIREBASE_STORAGE_BUCKET',
+  'VITE_FIREBASE_MESSAGING_SENDER_ID',
+  'VITE_FIREBASE_APP_ID',
+];
+
+const validateFirebaseConfig = () => {
+  const missing = [];
+  const config = {};
+
+  REQUIRED_ENV_VARS.forEach((key) => {
+    const value = import.meta.env[key];
+    if (!value || typeof value !== 'string' || value.trim().length === 0) {
+      missing.push(key);
+    } else {
+      config[key] = value.trim();
+    }
+  });
+
+  if (missing.length > 0) {
+    const errorMsg = `❌ Firebase configuration incomplete. Missing: ${missing.join(', ')}`;
+    console.error(errorMsg);
+    if (import.meta.env.MODE === 'production') {
+      throw new Error(errorMsg);
+    }
+    console.warn('⚠️ Using fallback values in development mode');
+  }
+
+  return {
+    apiKey: config.VITE_FIREBASE_API_KEY || 'AIzaSyBfW-DJsytPbGbIutbYfd9kXO9y7jCqCEg',
+    authDomain: config.VITE_FIREBASE_AUTH_DOMAIN || 'eataly-creative-ai-suite.firebaseapp.com',
+    projectId: config.VITE_FIREBASE_PROJECT_ID || 'eataly-creative-ai-suite',
+    storageBucket: config.VITE_FIREBASE_STORAGE_BUCKET || 'eataly-creative-ai-suite.appspot.com',
+    messagingSenderId: config.VITE_FIREBASE_MESSAGING_SENDER_ID || '392418318075',
+    appId: config.VITE_FIREBASE_APP_ID || '1:392418318075:web:3c1aa88df71dca64da425e',
+    measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID?.trim() || 'G-GSE68WH3P9',
+  };
 };
 
-const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+const firebaseConfig = validateFirebaseConfig();
+
+console.log('[Firebase] Initializing with project:', firebaseConfig.projectId);
+console.log('[Firebase] Storage bucket:', firebaseConfig.storageBucket);
+console.log('[Firebase] Auth domain:', firebaseConfig.authDomain);
+
+const existingApps = getApps();
+let app;
+
+if (existingApps.length > 0) {
+  const existingApp = existingApps[0];
+  const existingProjectId = existingApp.options?.projectId;
+  
+  if (existingProjectId && existingProjectId !== firebaseConfig.projectId) {
+    console.warn(
+      `[Firebase] Existing app with different project (${existingProjectId}). Re-initializing with ${firebaseConfig.projectId}`
+    );
+    app = initializeApp(firebaseConfig, `app-${Date.now()}`);
+  } else {
+    app = existingApp;
+    console.log('[Firebase] Reusing existing Firebase app');
+  }
+} else {
+  app = initializeApp(firebaseConfig);
+  console.log('[Firebase] Initialized new Firebase app');
+}
 
 const auth = getAuth(app);
 const db = getFirestore(app);
 const storage = getStorage(app);
+
+console.log('[Firebase] FIREBASE PROJECT ID:', firebaseConfig.projectId);
+console.log('[Firebase] Firestore instance created:', db.app.name);
+console.log('[Firebase] Firestore project:', db.app.options.projectId);
+
+if (import.meta.env.MODE === 'production') {
+  console.log('[Firebase] Production mode - verifying configuration...');
+  if (firebaseConfig.projectId !== 'eataly-creative-ai-suite') {
+    console.error('[Firebase] ⚠️ WARNING: Project ID mismatch! Expected: eataly-creative-ai-suite, Got:', firebaseConfig.projectId);
+  }
+}
 
 export { app, auth, db, storage };
 
